@@ -1,0 +1,17 @@
+name: fork-tests
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std
+      - name: Fork tests against real mUSD on Mezo testnet
+        run: forge test -vv
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Keeper syntax check
+        run: cd keeper && npm ci && node --check keeper.mjs
