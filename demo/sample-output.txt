@@ -1,0 +1,75 @@
+
+== Forking Mezo testnet (chain 31611) locally
+Real mUSD contracts on the fork. MUSD supply: 523759513 MUSD, troves: 282
+
+== Swapping Mezo's oracle precompile for a mock (so we can crash BTC on demand)
+BTC price: $84000
+
+== Deploying LifelineFactory (Lifeline: auto-rescue for MUSD troves)
+LifelineFactory: 0xF97f395dAb1F8f5936d51770F277c42a86DC1B99
+
+== Alice creates a vault: protect below 130% ICR, restore to 160%, keeper tip 0.5% (max 0.0005 BTC)
+Alice's vault: 0x81c606389392eB118C30EFE5aC113fa997Ed485F
+
+== Alice opens a trove through the vault: 0.05 BTC collateral, borrows 2,000 MUSD; parks 0.04 BTC as rescue reserve
+Alice's MUSD balance: 2000.000000000000000000
+
+== Bob opens the SAME trove directly on mUSD, with no Lifeline
+status               1 (success)
+transactionHash      0xfb951e6b86616a5e6a907289bcbffedbfd28c9c46ffc1bc5d55c86964baefdf7
+Bob's ICR: 1.907 (same as Alice's)
+
+== Starting the keeper bot (anyone can run one)
+[00:43:46] keeper 0x90F79bf6EB2c4f870365E785982E1f101E93b906 watching factory 0xF97f395dAb1F8f5936d51770F277c42a86DC1B99 on http://127.0.0.1:8545
+[00:43:46] scanned 1 vault(s), 0 at risk
+[00:43:49] scanned 1 vault(s), 0 at risk
+0x81c606389392eB118C30EFE5aC113fa997Ed485F
+  BTC price $84,000
+  ICR 190.7%  (trigger 130.0%, target 160.0%)  ok
+  collateral 0.05000 BTC  debt 2202.00 MUSD  liquidation price $48,444
+  rescue reserve 0.04000 BTC + 0.00 MUSD
+  redemption guard: off
+
+== BTC crashes 45%: $84,000 -> $46,200. Both troves fall to ~105%, under the 110% liquidation line
+[00:43:52] scanned 1 vault(s), 1 at risk
+[00:43:52] RESCUE 0x81c606389392eB118C30EFE5aC113fa997Ed485F: ICR 104.9% < trigger 130.0%
+[00:44:00] Lifeline rescued 0x81c606389392eB118C30EFE5aC113fa997Ed485F: ICR 104.9% -> 160.0%, added 0.02626 BTC, repaid 0.00 MUSD, keeper tip 0.00013 BTC. tx 0x8a911a010c68675d70595f928427a75703bc57015737aed1aff8a07e3e1e694a
+
+== Vault after the keeper's rescue
+0x81c606389392eB118C30EFE5aC113fa997Ed485F
+  BTC price $46,200
+  ICR 160.0%  (trigger 130.0%, target 160.0%)  ok
+  collateral 0.07626 BTC  debt 2202.00 MUSD  liquidation price $31,763
+  rescue reserve 0.01361 BTC + 0.00 MUSD
+  redemption guard: off
+
+== A liquidator tries both troves
+Bob (no Lifeline):  LIQUIDATED. His 0.05 BTC collateral is gone.
+Alice (guarded):    liquidation REVERTED. Trove still active at the 160% target.
+
+== Part 2: the redemption guard. BTC recovers to $84,000
+mUSD redeems MUSD for BTC from the LOWEST-ICR troves above 110% first. Real testnet troves sit at 114-131%.
+
+== Carol opens a vault at ~127% ICR (safe from liquidation) with a redemption guard: keep >= 25,000 MUSD of other debt ahead of me
+[00:44:03] scanned 1 vault(s), 0 at risk
+[00:44:06] scanned 2 vault(s), 0 at risk
+[00:44:09] scanned 2 vault(s), 0 at risk
+Insert hints from HintHelpers + SortedTroves: 0x66f9368f6Ff8d5B15e9a3dC55858434F598Abc89 0xE6C29Ea1873853eB9f5968f9513FfD6cE874D314  (cuts openTrove gas from ~6.3M to ~0.66M on this list)
+Carol's trove is open at ~127%. The keeper notices she is at the front of the redemption queue...
+[00:44:16] scanned 2 vault(s), 1 at risk
+[00:44:16] RESCUE 0x8e9b41Ca60D6a6703a29Ad30c7C0958F008ac965: front of the redemption queue (ICR 127.4% < safe 132.8%)
+[00:44:53] Lifeline rescued 0x8e9b41Ca60D6a6703a29Ad30c7C0958F008ac965 (redemption guard): ICR 127.4% -> 133.8%, added 0.00167 BTC, repaid 0.00 MUSD, keeper tip 0.00001 BTC. tx 0x2071b8b7e1202dd900a3f5747ef985e7697bcf60dbd6eab6b724310ef34e0a7d
+0x8e9b41Ca60D6a6703a29Ad30c7C0958F008ac965
+  BTC price $84,000
+  ICR 133.8%  (trigger 120.0%, target 130.0%)  ok
+  collateral 0.03507 BTC  debt 2202.00 MUSD  liquidation price $69,062
+  rescue reserve 0.02832 BTC + 0.00 MUSD
+  redemption guard: needs ICR >= 132.8% to stay behind the buffer  ok
+
+== A redeemer swaps 20,000 MUSD for BTC through mUSD's redemption mechanism
+[00:44:56] scanned 2 vault(s), 0 at risk
+status               1 (success)
+Redeemer MUSD left: 2316 (20,000 MUSD redeemed from other troves)
+Carol (guarded):    collateral unchanged at 0.035073009247398878 BTC. The redemption never reached her.
+
+== Done
