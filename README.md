@@ -116,6 +116,8 @@ Then put the factory address in `docs/config.js` to turn on the dashboard's writ
 |---|---|
 | Mezo testnet (31611) | [`0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149`](https://explorer.test.mezo.org/address/0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149) |
 
+Source verification: LifelineFactory and the demo LifelineVault are **verified on Sourcify (exact match: creation + runtime for the factory, runtime for the vault)**: [factory](https://repo.sourcify.dev/31611/0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149) · [vault](https://repo.sourcify.dev/31611/0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF). Reproduce it with `forge verify-contract <addr> src/LifelineFactory.sol:LifelineFactory --chain-id 31611 --verifier sourcify`.
+
 **Live demo on Mezo testnet (real oracle, real trove list), Oct 22, 2026 UTC:**
 
 | Step | Transaction |
