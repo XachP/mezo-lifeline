@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lifeline: liquidation + redemption protection for MUSD troves on Mezo</title>
+<style>
+  :root { --bg:#0e0e12; --card:#17171f; --line:#2a2a36; --txt:#ececf1; --mut:#9a9aae; --red:#ff004d; --grn:#2bd67b; --yel:#ffc53d; }
+  * { box-sizing:border-box } body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt) }
+  header { padding:28px 20px 8px; max-width:1040px; margin:auto } h1 { margin:0; font-size:28px } h1 span { color:var(--red) }
+  .sub { color:var(--mut); margin:6px 0 0 } main { max-width:1040px; margin:auto; padding:12px 20px 60px; display:grid; gap:16px; grid-template-columns:1fr 1fr }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px } .wide { grid-column:1 / -1 }
+  h2 { margin:0 0 10px; font-size:17px } label { display:flex; justify-content:space-between; gap:10px; margin:6px 0; color:var(--mut) }
+  input { width:130px; background:#0b0b10; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 8px; text-align:right }
+  input.addr { width:100%; text-align:left; font-family:ui-monospace,monospace } button { background:var(--red); color:#fff; border:0; border-radius:8px; padding:8px 14px; font-weight:600; cursor:pointer; margin:4px 6px 4px 0 }
+  button.sec { background:#2a2a36 } button:disabled { opacity:.45; cursor:default } .big { font-size:26px; font-weight:700 } .mut { color:var(--mut) } .ok { color:var(--grn) } .warn { color:var(--yel) } .bad { color:var(--red) }
+  table { width:100%; border-collapse:collapse } td { padding:4px 0; border-bottom:1px solid var(--line) } td:last-child { text-align:right; font-family:ui-monospace,monospace }
+  .bar { height:12px; background:#0b0b10; border-radius:6px; overflow:hidden; margin:6px 0 } .bar > div { height:100% }
+  pre { white-space:pre-wrap; background:#0b0b10; border-radius:8px; padding:10px; font-size:12.5px; max-height:220px; overflow:auto }
+  @media (max-width:760px) { main { grid-template-columns:1fr } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Life<span>line</span></h1>
+  <p class="sub">A standing safety policy for MUSD troves on Mezo. Park a small BTC or MUSD rescue reserve in your vault. When BTC drops below your trigger, <b>or your trove drifts to the front of mUSD's redemption queue</b>, any keeper can push it back to safety, again and again, with exact sorted-list hints. Keepers can only move your reserve into <em>your own trove</em>, and they earn a tip you cap. Works with smart accounts; no pre-signed one-shot signatures.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Crash simulator (no wallet needed)</h2>
+    <label>BTC price (USD) <input id="sPrice" type="number" value="84000"></label>
+    <label>Collateral (BTC) <input id="sColl" type="number" value="0.05" step="0.001"></label>
+    <label>Borrowed (MUSD) <input id="sDebt" type="number" value="2000"></label>
+    <label>BTC rescue reserve <input id="sRes" type="number" value="0.04" step="0.001"></label>
+    <label>MUSD rescue reserve <input id="sResM" type="number" value="0"></label>
+    <label>Protect below ICR (%) <input id="sTrig" type="number" value="130"></label>
+    <label>Restore to ICR (%) <input id="sTgt" type="number" value="160"></label>
+  </section>
+  <section class="card">
+    <h2>How far can BTC fall?</h2>
+    <div class="mut">Without Lifeline, liquidated at</div>
+    <div class="big bad" id="oLiq0">-</div>
+    <div class="mut">With Lifeline (reserve fully used), liquidated at</div>
+    <div class="big ok" id="oLiq1">-</div>
+    <div class="bar"><div id="oBar" style="background:linear-gradient(90deg,var(--red),var(--grn))"></div></div>
+    <table>
+      <tr><td>Current ICR</td><td id="oIcr">-</td></tr>
+      <tr><td>Debt incl. 200 MUSD gas comp + 0.1% fee</td><td id="oDebt">-</td></tr>
+      <tr><td>Keeper steps in at BTC price</td><td id="oTrigP">-</td></tr>
+      <tr><td>Extra drawdown survived</td><td id="oExtra">-</td></tr>
+    </table>
+    <p class="mut" style="font-size:12.5px">Model: mUSD liquidates below 110% ICR (150% if the whole system enters Recovery Mode; the vault raises its trigger to 155% automatically then). Multiple rescues can happen on the way down; this shows the floor once the whole reserve is in the trove.</p>
+  </section>
+
+  <section class="card wide">
+    <h2>2. Redemption queue radar (live Mezo testnet, no wallet)</h2>
+    <p class="mut">mUSD lets anyone swap MUSD for BTC from the <b>lowest-ICR troves at or above 110%</b> first. You are not liquidated, but you lose BTC at today's price. Enter an ICR to see how much other debt stands between you and the next redemption.</p>
+    <label style="max-width:420px">Your ICR (%) <input id="qIcr" type="number" value="127"></label>
+    <label style="max-width:420px">Buffer you want ahead of you (MUSD) <input id="qBuf" type="number" value="25000"></label>
+    <button class="sec" id="bQueue">Scan live queue</button>
+    <pre id="qOut" style="max-height:none">Click "Scan live queue" to read SortedTroves + TroveManager on Mezo testnet.</pre>
+  </section>
+
+  <section class="card wide">
+    <h2>3. Live on Mezo testnet</h2>
+    <p class="mut" id="liveNote">Connect a wallet on Mezo Testnet (chain 31611). Get test BTC at <a style="color:#fff" href="https://faucet.test.mezo.org/" target="_blank">faucet.test.mezo.org</a>.</p>
+    <button id="bConnect">Connect wallet</button>
+    <span class="mut" id="who"></span>
+    <div id="live" style="display:none">
+      <h2 style="margin-top:14px">Create your vault</h2>
+      <label>Trigger ICR % <input id="pTrig" type="number" value="130"></label>
+      <label>Target ICR % <input id="pTgt" type="number" value="160"></label>
+      <label>Keeper tip (bps of rescue, max 200) <input id="pTip" type="number" value="50"></label>
+      <label>Max keeper tip (BTC) <input id="pMax" type="number" value="0.0005" step="0.0001"></label>
+      <label>Redemption guard: keep this much other debt ahead of me (MUSD, 0 = off) <input id="pBuf" type="number" value="25000"></label>
+      <button id="bCreate">Create vault</button>
+      <h2 style="margin-top:14px">Your vault</h2>
+      <input class="addr" id="vAddr" placeholder="vault address (auto-filled after you create one)">
+      <label>Collateral BTC <input id="tColl" type="number" value="0.05" step="0.001"></label>
+      <label>Borrow MUSD (min 1,800) <input id="tDebt" type="number" value="2000"></label>
+      <label>Plus BTC rescue reserve <input id="tRes" type="number" value="0.02" step="0.001"></label>
+      <button id="bOpen">Open trove + fund reserve</button>
+      <button class="sec" id="bFund">Add BTC to reserve</button>
+      <button class="sec" id="bRefresh">Refresh health</button>
+      <button class="sec" id="bProtect">Run protect() (anyone)</button>
+      <pre id="health">-</pre>
+    </div>
+    <pre id="logBox" style="display:none"></pre>
+  </section>
+
+  <section class="card wide">
+    <h2>4. Watch any vault (read-only, no wallet)</h2>
+    <input class="addr" id="wAddr" placeholder="0x... LifelineVault address"> <button class="sec" id="bWatch">Check health</button>
+    <pre id="wOut">-</pre>
+    <p class="mut">Source, tests, keeper bot and the 45%-crash demo: see the GitHub repository README.</p>
+  </section>
+</main>
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script>
+const C = window.GUARDIAN_CONFIG, $ = (id) => document.getElementById(id);
+const fmtUsd = (x) => isFinite(x) && x > 0 ? "$" + Math.round(x).toLocaleString("en-US") : "-";
+// ---------------- simulator ----------------
+function sim() {
+  const P = +$("sPrice").value, c = +$("sColl").value, d0 = +$("sDebt").value, r = +$("sRes").value, rm = +$("sResM").value;
+  const trig = +$("sTrig").value / 100;
+  const debt = d0 * 1.001 + 200; // borrowing fee + gas compensation
+  const liq0 = 1.1 * debt / c;
+  const debt1 = Math.max(debt - rm, 2000);
+  const liq1 = 1.1 * debt1 / (c + r);
+  const trigP = trig * debt / c;
+  $("oLiq0").textContent = fmtUsd(liq0) + "  (" + (100 * (1 - liq0 / P)).toFixed(1) + "% drop)";
+  $("oLiq1").textContent = fmtUsd(liq1) + "  (" + (100 * (1 - liq1 / P)).toFixed(1) + "% drop)";
+  $("oIcr").textContent = (100 * c * P / debt).toFixed(1) + "%";
+  $("oDebt").textContent = debt.toFixed(2) + " MUSD";
+  $("oTrigP").textContent = fmtUsd(trigP);
+  $("oExtra").textContent = (100 * (liq0 - liq1) / P).toFixed(1) + " pts";
+  $("oBar").style.width = Math.max(0, Math.min(100, 100 * (1 - liq1 / P))) + "%";
+}
+document.querySelectorAll("section.card:first-child input").forEach((i) => i.addEventListener("input", sim)); sim();
+
+// ---------------- live ----------------
+const FACTORY_ABI = ["function createVault((uint64,uint64,uint16,uint128,uint128)) returns (address)", "function vaultsOfOwner(address) view returns (address[])"];
+const ST_ABI = ["function getLast() view returns (address)", "function getPrev(address) view returns (address)", "function getSize() view returns (uint256)", "function findInsertPosition(uint256,address,address) view returns (address,address)"];
+const TM_ABI = ["function getCurrentICR(address,uint256) view returns (uint256)", "function getEntireDebtAndColl(address) view returns (uint256,uint256,uint256,uint256,uint256,uint256)"];
+const HH_ABI = ["function getApproxHint(uint256,uint256,uint256) view returns (address,uint256,uint256)"];
+const PF_ABI = ["function fetchPrice() view returns (uint256)"];
+const VAULT_ABI = [
+  "function health() view returns ((uint8 status,uint256 price,uint256 icr,uint256 trigger,uint256 target,bool recoveryMode,bool needsProtection,uint256 coll,uint256 debt,uint256 reserveBtc,uint256 reserveMusd,uint256 liquidationPrice,uint256 redemptionSafeICR,bool redemptionRisk))",
+  "function openTrove(uint256,uint256,address,address) payable", "function fundReserve(uint256) payable", "function protect(address,address)"];
+const Z = "0x0000000000000000000000000000000000000000";
+const ro = new ethers.JsonRpcProvider(C.rpcUrl);
+let signer;
+const log = (m) => { const b = $("logBox"); b.style.display = "block"; b.textContent = m + "\n" + b.textContent; };
+const pct = (x) => (Number(ethers.formatUnits(x, 16))).toFixed(1) + "%";
+function describe(h) {
+  if (Number(h.status) !== 1) return "No active trove yet (status " + h.status + ").  Reserve: " + ethers.formatEther(h.reserveBtc) + " BTC";
+  return `BTC ${fmtUsd(+ethers.formatEther(h.price))}${h.recoveryMode ? "   ** SYSTEM IN RECOVERY MODE **" : ""}
+ICR ${pct(h.icr)}   trigger ${pct(h.trigger)}   target ${pct(h.target)}   ${h.needsProtection ? "AT RISK: keepers will rescue" : "healthy"}
+Collateral ${(+ethers.formatEther(h.coll)).toFixed(5)} BTC   Debt ${(+ethers.formatEther(h.debt)).toFixed(2)} MUSD   Liquidation price ${fmtUsd(+ethers.formatEther(h.liquidationPrice))}
+Rescue reserve ${(+ethers.formatEther(h.reserveBtc)).toFixed(5)} BTC + ${(+ethers.formatEther(h.reserveMusd)).toFixed(2)} MUSD
+Redemption guard: ${h.redemptionSafeICR == 0n ? "off" : "needs ICR >= " + pct(h.redemptionSafeICR) + (h.redemptionRisk ? "   FRONT OF QUEUE: keepers will lift it" : "   ok")}`;
+}
+async function health(addr, out) {
+  try { $(out).textContent = describe(await new ethers.Contract(addr, VAULT_ABI, ro).health()); }
+  catch (e) { $(out).textContent = "Could not read vault: " + (e.shortMessage || e.message); }
+}
+$("bWatch").onclick = () => health($("wAddr").value.trim(), "wOut");
+if (!C.factory) $("liveNote").innerHTML += "<br><b>Testnet factory not deployed yet: the simulator and read-only watcher work; write actions unlock once the factory address is set.</b>";
+$("bConnect").onclick = async () => {
+  if (!window.ethereum) return alert("Install a browser wallet (MetaMask, Taho, etc.)");
+  try {
+    await ethereum.request({ method: "wallet_addEthereumChain", params: [{ chainId: "0x" + C.chainId.toString(16), chainName: C.chainName,
+      nativeCurrency: { name: "Bitcoin", symbol: "BTC", decimals: 18 }, rpcUrls: [C.rpcUrl], blockExplorerUrls: [C.explorer] }] });
+  } catch (e) { /* already added */ }
+  const bp = new ethers.BrowserProvider(window.ethereum); signer = await bp.getSigner();
+  $("who").textContent = "connected " + (await signer.getAddress());
+  $("live").style.display = "block";
+  if (C.factory) {
+    const vs = await new ethers.Contract(C.factory, FACTORY_ABI, ro).vaultsOfOwner(await signer.getAddress());
+    if (vs.length) { $("vAddr").value = vs[vs.length - 1]; health(vs[vs.length - 1], "health"); }
+  }
+};
+async function send(label, fn) { try { log(label + "..."); const tx = await fn(); log("tx " + C.explorer + "/tx/" + tx.hash); await tx.wait(); log(label + " confirmed"); health($("vAddr").value, "health"); } catch (e) { log(label + " failed: " + (e.shortMessage || e.message)); } }
+const btcWei = (v) => ethers.parseEther(String(v));
+$("bCreate").onclick = () => send("create vault", async () => {
+  const f = new ethers.Contract(C.factory, FACTORY_ABI, signer);
+  const p = [BigInt(Math.round(+$("pTrig").value * 100)) * 10n ** 14n, BigInt(Math.round(+$("pTgt").value * 100)) * 10n ** 14n, +$("pTip").value, btcWei($("pMax").value), ethers.parseEther(String(+$("pBuf").value || 0))];
+  const tx = await f.createVault(p);
+  tx.wait().then(async () => { const vs = await f.vaultsOfOwner(await signer.getAddress()); $("vAddr").value = vs[vs.length - 1]; });
+  return tx;
+});
+// Exact SortedTroves insert position: a zero hint walks the whole list (6.3M gas on testnet today vs ~0.66M with hints).
+async function insertHints(coll, totalDebt) {
+  const nicr = coll * 10n ** 20n / totalDebt;
+  const size = await new ethers.Contract(C.sortedTroves, ST_ABI, ro).getSize();
+  const trials = BigInt(Math.min(40, Math.ceil(15 * Math.sqrt(Number(size)))));
+  const [h] = await new ethers.Contract(C.hintHelpers, HH_ABI, ro).getApproxHint(nicr, trials, 42n);
+  return new ethers.Contract(C.sortedTroves, ST_ABI, ro).findInsertPosition(nicr, h, h);
+}
+$("bOpen").onclick = () => send("open trove", async () => {
+  const coll = btcWei($("tColl").value), debt = ethers.parseEther(String($("tDebt").value));
+  const [up, lo] = await insertHints(coll, debt * 1001n / 1000n + 200n * 10n ** 18n);
+  log("insert hints " + up.slice(0, 10) + "... / " + lo.slice(0, 10) + "...");
+  return new ethers.Contract($("vAddr").value, VAULT_ABI, signer).openTrove(coll, debt, up, lo, { value: coll + btcWei($("tRes").value) });
+});
+$("bFund").onclick = () => send("fund reserve", () => new ethers.Contract($("vAddr").value, VAULT_ABI, signer).fundReserve(0, { value: btcWei($("tRes").value) }));
+$("bProtect").onclick = () => send("protect", () => new ethers.Contract($("vAddr").value, VAULT_ABI, signer).protect(Z, Z));
+$("bRefresh").onclick = () => health($("vAddr").value, "health");
+
+// ---------------- redemption queue radar ----------------
+const retry = async (f, n = 5) => { for (let i = 0; ; i++) { try { return await f(); } catch (e) { if (i >= n) throw e; await new Promise((r) => setTimeout(r, 600 * (i + 1))); } } };
+$("bQueue").onclick = async () => {
+  const out = $("qOut"); out.textContent = "reading the live trove list...";
+  try {
+    const st = new ethers.Contract(C.sortedTroves, ST_ABI, ro), tm = new ethers.Contract(C.troveManager, TM_ABI, ro);
+    const price = await retry(() => new ethers.Contract(C.priceFeed, PF_ABI, ro).fetchPrice());
+    const mine = BigInt(Math.round(+$("qIcr").value * 100)) * 10n ** 14n, buf = +$("qBuf").value;
+    const size = Number(await retry(() => st.getSize()));
+    let cur = await retry(() => st.getLast()), ahead = 0, rows = [], safe = null, acc = 0;
+    for (let i = 0; i < 80 && cur !== Z; i++) {
+      const icr = await retry(() => tm.getCurrentICR(cur, price));
+      if (icr >= 11n * 10n ** 17n) {
+        const d = await retry(() => tm.getEntireDebtAndColl(cur)), debt = +ethers.formatEther(d[1] + d[2] + d[4] + d[5]);
+        acc += debt; if (icr < mine) ahead += debt;
+        if (rows.length < 8) rows.push(`  #${rows.length + 1}  ICR ${pct(icr)}  debt ${Math.round(debt).toLocaleString("en-US")} MUSD`);
+        if (safe === null && acc >= buf) safe = icr + 2n * 10n ** 16n;
+        if (icr >= mine && safe !== null) break;
+      }
+      cur = await retry(() => st.getPrev(cur));
+    }
+    out.textContent = `BTC ${fmtUsd(+ethers.formatEther(price))}   ${size} active troves
+Front of the redemption queue (lowest ICR >= 110% first):
+${rows.join("\n")}
+
+At ${pct(mine)} ICR, about ${Math.round(ahead).toLocaleString("en-US")} MUSD of other debt is redeemed before you.
+${ahead < buf ? "TOO CLOSE: a redemption of ~" + Math.round(ahead).toLocaleString("en-US") + " MUSD reaches your BTC." : "OK: your buffer is covered."}
+Lifeline redemption guard with a ${buf.toLocaleString("en-US")} MUSD buffer would keep you at ICR >= ${safe ? pct(safe) : "(n/a)"}.`;
+  } catch (e) { out.textContent = "Could not read the queue: " + (e.shortMessage || e.message); }
+};
+if (location.hash === "#radar") $("bQueue").click();
+if (C.demoVault) { $("wAddr").value = C.demoVault; health(C.demoVault, "wOut"); }
+</script>
+</body>
+</html>
