@@ -1,0 +1,10 @@
+Lifeline. A standing safety policy for MUSD troves on Mezo. Set one rule, and anyone can enforce it, but no one can abuse it.
+MUSD borrowers can lose Bitcoin two ways. Liquidation, under one hundred ten percent. And redemption: MUSD is swapped for Bitcoin from the lowest ratio troves first. On testnet today, a trove at one twenty seven has only about eighteen thousand MUSD in front of it.
+A Lifeline vault owns your trove and holds a small rescue reserve. When your ratio drops below your trigger, or you drift to the front of the redemption queue, anyone can call protect. Keepers can only move your reserve into your own trove.
+It plugs straight into the deployed mUSD contracts and the sorted trove list. It raises the trigger in Recovery Mode, and uses exact hints, which cut gas from six million to under seven hundred thousand.
+Demo one, on a fork of Mezo testnet. Bitcoin falls forty five percent. The keeper rescues Alice back to one sixty. Bob, with no Lifeline, is liquidated. Alice's liquidation reverts.
+Demo two. Carol sits at one twenty seven percent, near the front of the redemption queue. The keeper lifts her behind a twenty five thousand MUSD buffer. A twenty thousand MUSD redemption then hits other troves, and her Bitcoin is untouched. Without the guard, it takes her collateral.
+The dashboard has a crash simulator and a live redemption radar that reads the real testnet queue, no wallet needed.
+Unlike alerts, or one shot signed rescues, Lifeline acts every time, adds Bitcoin or repays, handles Recovery Mode and redemptions, and works with smart accounts. Sixteen fork tests pass against live mUSD.
+Safer borrowing means more MUSD borrowed. In Wave two: auto deleveraging, yield on the reserve, and one click migration.
+Lifeline. Never get liquidated, or redeemed, in your sleep.
