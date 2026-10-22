@@ -16,19 +16,19 @@ img.shot { border:2px solid #2a2a36; border-radius:18px; width:980px }
 <section class="s"><div style="margin-top:150px"><h1>Life<span>line</span></h1>
 <p style="font-size:52px">A standing safety policy for MUSD troves on Mezo</p>
 <p class="m">Set a rule once: "below 130%, put my reserve in until I'm back at 160%,<br>and keep 25,000 MUSD of other debt ahead of me in the redemption queue".<br>Anyone can enforce it. No one can abuse it.</p>
-<p class="m" style="font-size:30px;margin-top:40px">Mezo Buildathon · Track 1 DeFi + Track 2 Access &amp; Distribution</p></div><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>1 / 10</span></div></section>
+<p class="m" style="font-size:30px;margin-top:40px">Mezo Buildathon · Track 1 DeFi + Track 2 Access &amp; Distribution</p></div><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>1 / 11</span></div></section>
 
 <section class="s"><h2>Two ways an MUSD borrower loses BTC</h2>
 <div class="cols"><div class="box"><p class="big r" style="margin:0">Liquidation</p><ul><li>Under <b class="r">110% ICR</b>, or under <b class="r">150%</b> in Recovery Mode</li><li>BTC falls 20–30% in days</li><li>Today's defense is to top up by hand at 3 AM</li></ul></div>
 <div class="box"><p class="big y" style="margin:0">Redemption</p><ul><li>MUSD is swapped for BTC from the <b>lowest-ICR troves ≥ 110%</b> first</li><li>Live testnet today: the front of the queue is at <b>114–131%</b></li><li>At 127% ICR, only <b>~18.6k MUSD</b> of debt stands in front of you</li></ul></div></div>
-<p class="y">Fear of both keeps BTC holders from borrowing MUSD at all.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>2 / 10</span></div></section>
+<p class="y">Fear of both keeps BTC holders from borrowing MUSD at all.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>2 / 11</span></div></section>
 
 <section class="s"><h2>The solution</h2>
 <div class="cols"><div class="box"><p><b>LifelineVault</b>: a smart account that is the borrower of record for one MUSD trove.</p>
 <p>The owner parks a small <b>BTC and/or MUSD rescue reserve</b> and sets a policy:<br><span class="m">trigger · target · keeper tip (≤ 2%, capped) · redemption buffer</span></p></div>
 <div class="box"><p><b>protect()</b> is permissionless. It fires when ICR &lt; trigger <b>or</b> the trove is inside the redemption buffer:</p>
 <ul><li>adds BTC (<code>addColl</code>) or repays (<code>repayMUSD</code>)</li><li>lifts the trove to safety, again and again</li><li>pays the caller a capped tip</li></ul></div></div>
-<p class="m" style="font-size:31px">Keepers can only move the reserve <b>into the owner's own trove</b>. Withdrawals, borrowing and closing stay owner-only. Works for smart accounts; no one-shot pre-signed signatures.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>3 / 10</span></div></section>
+<p class="m" style="font-size:31px">Keepers can only move the reserve <b>into the owner's own trove</b>. Withdrawals, borrowing and closing stay owner-only. Works for smart accounts; no one-shot pre-signed signatures.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>3 / 11</span></div></section>
 
 <section class="s"><h2>How it plugs into mUSD</h2>
 <div class="flow"><div class="node">Owner<br><span class="m" style="font-size:26px">policy + reserve</span></div><div class="arrow">→</div>
@@ -38,7 +38,7 @@ img.shot { border:2px solid #2a2a36; border-radius:18px; width:980px }
 <div class="node">protect(hints)<br><span class="m" style="font-size:26px">PriceFeed · TroveManager · SortedTroves</span></div><div class="arrow">→</div>
 <div class="node">Safe again<br><span class="m" style="font-size:26px">tip ≤ min(2%, cap)</span></div></div>
 <ul style="margin-top:40px"><li><b>Recovery-Mode aware</b>: the trigger rises to ≥155% when system TCR &lt; 150%</li>
-<li><b>Exact HintHelpers hints</b>: opening on the 280-trove list costs ~0.66M gas instead of 6.3M</li><li>A rescue that can't clear the liquidation line reverts instead of wasting funds</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>4 / 10</span></div></section>
+<li><b>Exact HintHelpers hints</b>: opening on the 280-trove list costs ~0.66M gas instead of 6.3M</li><li>A rescue that can't clear the liquidation line reverts instead of wasting funds</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>4 / 11</span></div></section>
 
 <section class="s"><h2>Demo 1: a 45% BTC crash on real mUSD contracts</h2>
 <pre>ICR 190.7%  (trigger 130.0%, target 160.0%)  ok      liquidation price $48,444
@@ -50,7 +50,7 @@ RESCUE 0x81c6…485F: ICR 104.9% &lt; trigger 130.0%
 == A liquidator tries both troves
 <span class="r">Bob (no Lifeline):  LIQUIDATED. His 0.05 BTC collateral is gone.</span>
 <span class="g">Alice (guarded):    liquidation REVERTED. Trove still active at the 160% target.</span></pre>
-<p class="m" style="font-size:28px;margin-top:24px">./demo/local-demo.sh forks Mezo testnet. Only the oracle precompile is mocked, so the price can move.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>5 / 10</span></div></section>
+<p class="m" style="font-size:28px;margin-top:24px">./demo/local-demo.sh forks Mezo testnet. Only the oracle precompile is mocked, so the price can move.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>5 / 11</span></div></section>
 
 <section class="s"><h2>Demo 2: the redemption guard</h2>
 <pre>Carol opens at ~127% ICR: safe from liquidation, but near the FRONT of the redemption queue
@@ -60,11 +60,24 @@ RESCUE 0x81c6…485F: ICR 104.9% &lt; trigger 130.0%
 == A redeemer swaps 20,000 MUSD for BTC through mUSD's redemption mechanism
 status 1 (success)
 <span class="g">Carol (guarded):  collateral unchanged at 0.03507 BTC. The redemption never reached her.</span></pre>
-<p style="margin-top:24px">Control test: <b class="r">without</b> the guard, the same 20,000 MUSD redemption against the live trove list <b class="r">takes Carol's BTC</b>.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>6 / 10</span></div></section>
+<p style="margin-top:24px">Control test: <b class="r">without</b> the guard, the same 20,000 MUSD redemption against the live trove list <b class="r">takes Carol's BTC</b>.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>6 / 11</span></div></section>
 
 <section class="s"><h2>Dashboard: crash simulator + live redemption radar</h2>
 <div style="display:flex;gap:40px;align-items:flex-start"><img class="shot" style="width:820px" src="dashboard.png"><img class="shot" style="width:820px" src="radar.png"></div>
-<p class="m" style="font-size:30px;margin-top:26px">Same trove, same 0.04 BTC reserve: the liquidation price moves from <b class="r">$48,444</b> to <b class="g">$26,913</b>. The radar reads the live testnet queue with no wallet needed. Wallet actions: create vault → open trove with exact hints → watch health.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>7 / 10</span></div></section>
+<p class="m" style="font-size:30px;margin-top:26px">Same trove, same 0.04 BTC reserve: the liquidation price moves from <b class="r">$48,444</b> to <b class="g">$26,913</b>. The radar reads the live testnet queue with no wallet needed. Wallet actions: create vault → open trove with exact hints → watch health.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>7 / 11</span></div></section>
+
+<section class="s"><h2>Live on Mezo testnet: real rescues, real txs</h2>
+<pre style="font-size:28px">LifelineFactory  <span class="g">0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149</span>
+Demo vault       <span class="g">0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF</span>
+<span class="m">Source verified on Sourcify (exact match)</span>
+
+open trove at 127.0% ICR (exact hints)                  tx 0xd624a32c...9da0
+<span class="y">redemption-guard lift: front of queue, 127.0% -> 134.1%</span> tx 0x2374b4b3...6e91
+policy tightened to trigger 140% / target 150%          tx 0xeb93cddc...bdec
+<span class="g">trigger rescue by keeper: 134.1% -> 150.0%</span>              tx 0x1470fdfb...13ea</pre>
+<p style="margin-top:28px">Real oracle, real 280-trove list, permissionless keeper. Links in the README and on <b>explorer.test.mezo.org</b></p>
+<p class="m" style="font-size:28px">The vault is healthy at 150% today: liquidation price ~$61.7k, redemption guard ok.</p>
+<div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>8 / 11</span></div></section>
 
 <section class="s"><h2>Why Lifeline</h2>
 <table style="font-size:32px;width:100%;border-collapse:collapse">
@@ -75,19 +88,19 @@ status 1 (success)
 <tr><td style="padding:12px 0">Redemption queue</td><td class="m">monitor</td><td class="m">monitor</td><td class="g">on-chain guard</td></tr>
 <tr><td style="padding:12px 0">Smart accounts / Passport</td><td class="m">–</td><td class="m">EOA signature</td><td class="g">any owner</td></tr>
 <tr><td style="padding:12px 0">Fork tests vs live mUSD</td><td class="m">–</td><td class="m">–</td><td class="g"><b>16 / 16</b></td></tr></table>
-<p class="m" style="font-size:28px">No admin, no upgrade keys, reentrancy guarded, double-capped tip, MIT, CI on every push. Not audited yet: testnet first.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>8 / 10</span></div></section>
+<p class="m" style="font-size:28px">No admin, no upgrade keys, reentrancy guarded, double-capped tip, MIT, CI on every push. Not audited yet: testnet first.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>9 / 11</span></div></section>
 
 <section class="s"><h2>Why it grows MUSD</h2>
 <ul><li><b>More borrowing</b>: holders who fear liquidation <i>and</i> redemption can borrow with a standing safety net</li>
 <li><b>Distribution</b>: an open-source keeper with Telegram alerts meets users where they already are (Track 2)</li>
 <li><b>Composable</b>: built on the deployed mUSD contracts, with no protocol changes</li>
 <li><b>Revenue path</b>: an optional, owner-chosen service fee on rescues; keepers earn tips</li>
-<li><b>Wave 2</b>: auto-deleverage through a Mezo pool (no idle reserve), MUSD savings yield on the reserve, one-click migration of existing troves, a hosted alert bot, then mainnet after review</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>9 / 10</span></div></section>
+<li><b>Wave 2</b>: auto-deleverage through a Mezo pool (no idle reserve), MUSD savings yield on the reserve, one-click migration of existing troves, a hosted alert bot, then mainnet after review</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>10 / 11</span></div></section>
 
 <section class="s"><div style="margin-top:150px"><h1>Life<span>line</span></h1>
 <p style="font-size:46px">Never get liquidated, or redeemed, in your sleep.</p>
-<p class="m">Code, tests, keeper and demo: <b>github.com/XachP/mezo-lifeline</b><br>Live dashboard: <b>xachp.github.io/mezo-lifeline</b></p>
-<p class="m" style="font-size:28px">Built with an AI coding agent and reviewed by the submitter. MIT licensed.</p></div><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>10 / 10</span></div></section>
+<p class="m">Code, tests, keeper and demo: <b>github.com/XachP/mezo-lifeline</b><br>Live dashboard: <b>xachp.github.io/mezo-lifeline</b><br>Mezo testnet factory: <b>0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149</b></p>
+<p class="m" style="font-size:28px">Built with an AI coding agent and reviewed by the submitter. MIT licensed.</p></div><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>11 / 11</span></div></section>
 
 <script>
 const n = parseInt(location.hash.slice(1));
