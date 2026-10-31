@@ -1,6 +1,8 @@
 # Lifeline
 
-**A standing safety policy for MUSD troves on Mezo: liquidation protection and a redemption guard.**
+**Lifeline turns idle BTC into productive MUSD with real counterparties.**
+
+A standing safety policy for MUSD troves on Mezo: liquidation protection and a redemption guard. Borrowed MUSD above a hard liquid floor can sit in Mezo's MUSD Savings Vault (sMUSD) until a keeper needs it.
 
 You park a small BTC and/or MUSD *rescue reserve* next to your trove and set a rule once. When either of these happens, any keeper can call `protect()`:
 
@@ -13,9 +15,9 @@ Built for the **Mezo Buildathon** (AKINDO). Tracks: **DeFi** (MUSD borrowing saf
 
 | | |
 |---|---|
-| Contracts | `src/LifelineVault.sol`, `src/LifelineFactory.sol` (MIT, Solidity 0.8.24) |
-| Integrates | mUSD `BorrowerOperations`, `TroveManager`, `PriceFeed`, `SortedTroves`, `HintHelpers`, `MUSD`. These are the real deployments, not forks of the protocol |
-| Tests | **16 Foundry fork tests against the live mUSD deployment on Mezo testnet**. Run them with `forge test` |
+| Contracts | `src/LifelineVault.sol`, `src/LifelineFactory.sol`, `src/ExternalKeeper.sol` (MIT, Solidity 0.8.24) |
+| Integrates | mUSD `BorrowerOperations`, `TroveManager`, `PriceFeed`, `SortedTroves`, `HintHelpers`, `MUSD`, and the testnet MUSD Savings Vault (sMUSD). These are the real deployments, not forks of the protocol |
+| Tests | **Foundry fork tests against the live mUSD deployment on Mezo testnet**. Run them with `forge test` |
 | Demo | `demo/local-demo.sh` runs on a local fork. Part 1: a 45% BTC crash where the unprotected trove is liquidated and the Lifeline trove survives. Part 2: a 20,000 MUSD redemption hits other troves and leaves the guarded trove's BTC untouched ([sample output](demo/sample-output.txt)) |
 | Keeper | `keeper/keeper.mjs`. A permissionless rescue bot that computes exact sorted-list hints, pauses on a stale oracle, and can send Telegram alerts |
 | Dashboard | `docs/index.html` (GitHub Pages). It has a crash simulator, a **live redemption-queue radar**, wallet actions with exact hints, and a read-only vault watcher |
@@ -25,7 +27,7 @@ Built for the **Mezo Buildathon** (AKINDO). Tracks: **DeFi** (MUSD borrowing saf
 
 MUSD is a Liquity-style CDP, which means two ways to lose BTC:
 
-* **Liquidation.** A trove under **110% ICR** can be liquidated. If the whole system drops under 150% TCR (Recovery Mode), any trove under **150%** can be liquidated. Bitcoin regularly falls 20–30% in days, and interest slowly pulls ICR down.
+* **Liquidation.** A trove is liquidated only when its ICR is **below 110%**. That line does not move. Recovery Mode (system TCR under 150%) blocks opening a trove below 150% and blocks refinancing; it does **not** liquidate troves between 110% and 150%. Confirmed on the live matsnet `TroveManager` (`if (ICR < MCR)`) and in the [Mezo glossary](https://mezo.org/docs/users/resources/glossary/). Bitcoin regularly falls 20–30% in days, and interest slowly pulls ICR down.
 * **Redemption.** Anyone can swap MUSD for BTC from the lowest-ICR troves at or above 110%. On Mezo testnet today, the front of the queue is at 114–131% ICR. At 127% ICR you have only **~18,600 MUSD** of other debt in front of you (live reading from the dashboard's radar on Oct 21, 2026), so one mid-sized redemption reaches your collateral.
 
 Today the protection is to watch the chart and the queue, then top up by hand. Lifeline turns that into a rule: *"if my ICR drops below 130%, put my reserve in until it's back to 160%, and always keep at least 25,000 MUSD of other debt ahead of me in the redemption queue."* Anyone can enforce the rule, and no one can abuse it.
@@ -36,7 +38,7 @@ Today the protection is to watch the chart and the queue, then top up by hand. L
 |---|---|---|---|
 | Acts while you sleep | no | once | **every time the rule is broken** |
 | Rescue with BTC (keep your MUSD) | – | repay only | **add BTC, or repay MUSD, or both** |
-| Recovery Mode (150% line) | sometimes warns | no | **trigger auto-raised to 155%** |
+| Recovery Mode (TCR < 150%) | sometimes warns | no | **liquidation stays at 110%; the owner's trigger is not rewritten** |
 | Redemption queue | monitor | monitor | **on-chain guard moves you behind a buffer** |
 | Smart accounts / Passport | – | needs an EOA signature | **owner can be any address** |
 | Gas on a 280-trove list | – | zero hints (millions of gas) | **exact HintHelpers hints (~0.66M vs 6.3M gas to open)** |
@@ -47,21 +49,43 @@ Today the protection is to watch the chart and the queue, then top up by hand. L
 2. `vault.openTrove{value: coll + reserve}(coll, debt, upperHint, lowerHint)` makes the vault the **borrower of record**. The borrowed MUSD goes to you. Any BTC beyond `coll` stays in the vault as the reserve. `fundReserve` adds more BTC (msg.value) or MUSD (pulled from the caller).
 3. `vault.health()` reports ICR, liquidation price, Recovery Mode, reserve, `redemptionSafeICR` and `redemptionRisk`. `needsProtection` is true when `ICR < trigger` **or** the trove is inside the redemption buffer.
 4. Anyone calls `vault.protect(upperHint, lowerHint)`. The vault:
-   * reads the mUSD price feed and Recovery Mode state;
+   * reads the mUSD price feed;
    * picks the target: your target ICR, or for a redemption rescue, `redemptionSafeICR` + 1 point. The extra point stops rounding from triggering it again;
-   * adds BTC from the reserve (`addColl`). If BTC runs short, it repays debt from the MUSD reserve (`repayMUSD`), never going below mUSD's min net debt;
-   * reverts if the rescue can't lift the trove above 110% (or 150% in Recovery Mode), so keepers don't waste a partial rescue;
-   * pays `min(tipBps × rescue size, maxTip)` to the caller and emits `Protected(..., redemptionGuard)`.
+   * plans a BTC top-up from the reserve and, if BTC runs short, an MUSD repayment (liquid MUSD, then sMUSD), never going below mUSD's min net debt;
+   * applies both in **one** `BorrowerOperations.adjustTrove`. A split `addColl` then `repayMUSD` reverts in normal mode when each leg would leave the trove under 110%;
+   * reverts if the rescue can't lift the trove **above 110%** (the same line in Recovery Mode);
+   * pays `min(tipBps × rescue size, maxTip)` to the caller and emits `Protected(..., redemptionGuard)`. That tip is Lifeline's fee.
 5. **The redemption guard** (`redemptionSafeICR`) walks `SortedTroves` from the lowest ICR upward, at most 60 steps, and adds up the debt of other redeemable troves until it reaches your buffer. Your safe ICR is that trove's ICR + 2 points. The result is capped at 250%, so a thin queue can't drain your reserve.
-6. **Recovery-Mode aware.** When system TCR is under 150%, the effective trigger rises to ≥ 155% and the target to ≥ trigger + 10 points.
-7. The owner keeps full control: `borrow`, `repay`, `withdrawColl`, `withdrawReserve`, `setPolicy`, `closeTrove` (returns all BTC and MUSD), and `claimAndSweep`.
+6. **Recovery Mode** is reported on `health()`, and borrowing is stricter while TCR is under 150%. The liquidation price stays at 110% of debt/collateral. The owner's trigger and target are not replaced with 155%/165%.
+7. **Idle MUSD.** The counterparty is the live [MUSD Savings Vault](https://mezo.org/docs/users/mezo-earn/vaults/musd-savings-vault/) on Mezo testnet, [`0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16`](https://explorer.test.mezo.org/address/0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16) (`musdToken()` is the same matsnet MUSD). `deployExcessMusd()` deposits only MUSD above `liquidMusdFloor` and only up to `savingsCap`, and only while `savingsPaused` is false. The floor cannot be set below **100 MUSD** (`MIN_LIQUID_MUSD`). Deposits start paused, with the floor at max and the cap at 0. Principal is 1:1 sMUSD. Yield is whatever `claimYield()` has actually been credited; Lifeline does not quote an APY. `protect()` can recall sMUSD into the owner's trove even while new deposits are paused.
+8. **Third-party callers.** `ExternalKeeper` is a separate contract. It can call `protect()` and nothing else. The tip is paid to that contract. [TrovePilot v2](https://github.com/VitalR/mezo-trovepilot) can call the same `protect()` surface; this repo does not reimplement it.
+9. The owner keeps full control: `borrow`, `repay`, `withdrawColl`, `withdrawReserve`, `setPolicy`, the savings floor/cap/pause, `recallSavings`, `closeTrove` (returns collateral, reserve, and sMUSD principal), and `claimAndSweep`.
 
 ### Security model
-* Only the owner can move value **out** of the vault. `protect()` can only move the vault's own reserve **into the vault's own trove**, and only when the on-chain state shows it is needed.
+* Only the owner can move value **out** of the vault. `protect()` can only move the vault's own reserve **into the vault's own trove**, and only when the on-chain state shows it is needed. `deployExcessMusd()` can only move MUSD above the hard floor, up to the owner's cap, and only when deposits are unpaused. Pausing deposits does not trap sMUSD: the owner and `protect()` can still recall it.
 * The tip is bounded twice: ≤ 2% by code and ≤ `maxTipWei` by the owner. The tip cap is held back from the rescue budget, so the rescue is never starved.
 * `nonReentrant` guards every state-changing entry point. There are no upgrade keys and no admin.
 * The price comes from mUSD's own `PriceFeed`, the same one that liquidations and redemptions use.
 * Not audited. This is testnet software built for a buildathon.
+
+## Revenue
+
+Lifeline charges one fee: the keeper tip on a successful `protect()`. That call is the adjustment (`BorrowerOperations.adjustTrove`), whether it is topping up before a liquidation or lifting the trove out of the redemption queue.
+
+* **Adjust / liquidation.** When ICR is under the owner's trigger, `protect()` adds BTC and/or repays MUSD in one `adjustTrove`. The caller is paid `tipBps` of the rescue's BTC value.
+* **Redemption.** The same `protect()` pays the same tip when it fires the redemption guard.
+* The owner sets `tipBps` and `maxTipWei`. The contract hard-caps the rate at **2%** (`MAX_TIP_BPS`), then caps it again at `maxTipWei`. The tip is BTC left in the reserve after the rescue, paid to `msg.sender` (an EOA keeper or a contract such as `ExternalKeeper`).
+* Lifeline earns it by running `keeper/keeper.mjs`. Anyone else who calls `protect()` first earns the same tip. There is no second protocol fee and no admin key that can raise this one.
+
+## Team
+
+Solo: **Zachary Plumey** ([@XachP](https://github.com/XachP)).
+
+## Deck
+
+* Wave 2 slides (source): [`deck/slides.html`](deck/slides.html)
+* Pitch deck PDF and narration from the buildathon recording: [`deck/Lifeline_deck.pdf`](deck/Lifeline_deck.pdf), [`deck/narration.txt`](deck/narration.txt)
+* Repo: [github.com/XachP/mezo-lifeline](https://github.com/XachP/mezo-lifeline)
 
 ## Try it
 
@@ -133,26 +157,29 @@ The live BTC price can't be crashed on demand, so the liquidation-trigger rescue
 
 mUSD testnet addresses used (from `mezo-org/musd/solidity/deployments/matsnet`): BorrowerOperations `0xCdF7…beE5`, TroveManager `0xE47c…6bb0`, PriceFeed `0x86bC…9366`, SortedTroves `0x722E…68fA`, HintHelpers `0x4e4c…BCF6`, MUSD `0x1189…c503`.
 
-## Test list (`test/LifelineFork.t.sol`, 16 tests)
+## Test list (`test/LifelineFork.t.sol`, 20 tests)
 - opening through the vault makes the vault the borrower, and the owner receives the MUSD
 - `protect` reverts while healthy
 - **a 45% crash: the unprotected twin trove gets liquidated; the Lifeline trove is restored to exactly 160% and can't be liquidated**
 - MUSD-only reserve: the rescue repays debt instead of adding BTC
-- Recovery Mode (real system TCR pushed under 150%): the trigger rises to 155%, and the trove is lifted to ≥ 165%
+- **Recovery Mode: a trove between 110% and 150% is not liquidated, a trove under 110% is, and the owner's trigger stays put**
+- **mixed BTC+MUSD under 110%: `addColl` alone and `repayMUSD` alone revert; one `adjustTrove` clears 110%**
+- **MUSD repayment from under 110% leaves the trove active when a liquidator tries it**
+- **sMUSD: deposits start paused, the cap starts at 0, the floor cannot go under 100 MUSD; excess is held as sMUSD; `protect()` recalls it while paused**
+- **`ExternalKeeper` (a second contract) calls `protect()`, repays MUSD from under 110%, receives the tip, and the trove survives liquidation**
 - a reserve too small to save the trove reverts with `ReserveTooSmall`
 - only the owner can withdraw, borrow, close, or change the policy
 - the keeper tip is capped; invalid policies are rejected
 - `factory.scan()` finds at-risk vaults, and none after the rescue
 - `health()` liquidation price math; `closeTrove` returns everything; `withdrawColl` and `borrow` pay the owner
 - the redemption guard is off by default
-- **the redemption guard, with a control: without the guard, a real 20,000 MUSD redemption against the live trove list takes the vault's BTC. With a 25k buffer, `protect()` lifts it behind the buffer, it does not trigger again, and the same redemption leaves its collateral untouched**
+- **the redemption guard, with a control: without the guard, a redemption that reaches the front of the live trove list takes the vault's BTC. With a buffer past that amount, `protect()` lifts it behind the buffer, it does not trigger again, and the same redemption leaves its collateral untouched**
 - the redemption guard reports healthy when the trove is already far enough back in the queue
 
-## Roadmap (Wave 2)
-- **Auto-deleverage without a reserve.** Sell a slice of collateral for MUSD on a Mezo pool and repay, for users who don't want idle BTC.
-- **Earn on the reserve.** Hold the MUSD reserve in MUSD savings and redeem just in time.
+## Roadmap
+- **Auto-deleverage without a prefunded MUSD reserve.** Sell the minimum slice of BTC for MUSD on a Mezo pool and repay. Not in this version: the testnet path that is live is the MUSD Savings Vault above.
 - **One-click migration** of existing EOA troves into a vault, plus BorrowerOperationsSignatures support.
-- Keeper incentives, a public keeper leaderboard, and a hosted alert bot. Mainnet deployment after review.
+- A public keeper leaderboard and a hosted alert bot. Mainnet deployment after review.
 
 ## AI disclosure
 This project was designed, written, and tested with an AI coding agent working for the submitter. The submitter reviewed it and is responsible for it.

@@ -48,11 +48,10 @@ contract LifelineFactory {
         address[] memory tmp = new address[](end > start ? end - start : 0);
         uint256 n;
         uint256 price = priceFeed.fetchPrice();
-        bool rm = troveManager.checkRecoveryMode(price);
         for (uint256 i = start; i < end; i++) {
             LifelineVault v = LifelineVault(payable(vaults[i]));
             if (troveManager.getTroveStatus(address(v)) != 1) continue;
-            (uint256 trigger,) = v.effectiveThresholds(rm);
+            (uint256 trigger,) = v.effectiveThresholds();
             uint256 icr = troveManager.getCurrentICR(address(v), price);
             uint256 safe = v.redemptionSafeICR(price);
             if (icr < trigger || (safe != 0 && icr < safe)) tmp[n++] = address(v);

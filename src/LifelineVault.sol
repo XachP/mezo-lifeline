@@ -1,29 +1,37 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves} from "./interfaces/IMezo.sol";
+import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves, IMUSDSavings} from "./interfaces/IMezo.sol";
 
 /// @title LifelineVault (Lifeline: auto-rescue for MUSD troves)
 /// @notice A smart account that owns ONE mUSD trove on Mezo and protects it from liquidation.
 ///         The owner parks a BTC and/or MUSD "rescue reserve" inside the vault and sets a policy
 ///         (trigger ICR, target ICR, keeper tip). When the trove's collateral ratio falls below the
-///         trigger (or below the Recovery-Mode danger line), ANYONE may call `protect()`: the vault
-///         tops up collateral from the BTC reserve and/or repays debt from the MUSD reserve until the
+///         trigger, ANYONE may call `protect()`: the vault tops up collateral from the BTC reserve
+///         and/or repays debt from the MUSD reserve in one `BorrowerOperations.adjustTrove` until the
 ///         trove is back at the target ratio, and pays the caller a small capped tip.
-///         Optional redemption guard: also rescue when too little other MUSD debt sits ahead of this
-///         trove in the redemption queue, by raising its ICR just past that point.
-///         Keepers can never withdraw, borrow, or move funds anywhere except into the owner's trove.
+///         MUSD liquidates a trove only when its ICR is below 110% (MCR), in normal mode and in
+///         Recovery Mode. Recovery Mode (system TCR below 150%) restricts new borrowing; it does not
+///         widen liquidations. Optional redemption guard: also rescue when too little other MUSD debt
+///         sits ahead of this trove in the redemption queue.
+///         Idle MUSD above `liquidMusdFloor` can be deposited to Mezo's MUSD Savings Vault (sMUSD).
+///         Keepers can never withdraw, borrow, or move funds anywhere except into the owner's trove
+///         (or into sMUSD still held by this vault, and only above the liquid floor).
 contract LifelineVault {
-    // ---- protocol constants (mirroring mUSD's LiquityBase) ----
-    uint256 public constant MCR = 1.1e18; // 110%: below this a trove is liquidatable
-    uint256 public constant CCR = 1.5e18; // 150%: system Recovery Mode threshold
-    uint256 public constant RECOVERY_BUFFER = 0.05e18; // stay 5 points above CCR in Recovery Mode
+    // ---- protocol constants (mirroring mUSD) ----
+    uint256 public constant MCR = 1.1e18; // 110%: a trove is liquidatable only below this, in every mode
+    uint256 public constant CCR = 1.5e18; // 150%: system enters Recovery Mode below this TCR. Not a liquidation line.
     uint256 public constant GAS_COMPENSATION = 200e18; // MUSD reserved for liquidators
+    /// @notice Mezo testnet MUSD Savings Rate proxy (sMUSD). `musdToken()` is matsnet MUSD.
+    ///         https://mezo.org/docs/users/mezo-earn/vaults/musd-savings-vault/
+    address public constant MUSD_SAVINGS = 0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16;
     uint256 public constant MAX_TIP_BPS = 200; // keeper tip can never exceed 2% of the rescue size
     uint256 public constant MAX_REDEMPTION_ICR = 2.5e18; // redemption guard never chases the queue above 250%
     uint256 public constant REDEMPTION_MARGIN = 0.02e18; // sit 2 points above the last trove in the buffer
     uint256 public constant REDEMPTION_HYSTERESIS = 0.01e18; // rescue overshoots the safe ICR by 1 point
     uint256 public constant MAX_QUEUE_STEPS = 60; // bound on the SortedTroves walk
+    /// @notice Hard minimum MUSD that must stay liquid. The owner cannot set the floor below this.
+    uint256 public constant MIN_LIQUID_MUSD = 100e18;
 
     IBorrowerOperations public immutable borrowerOperations;
     ITroveManager public immutable troveManager;
@@ -43,6 +51,14 @@ contract LifelineVault {
     }
 
     Policy public policy;
+    /// @notice MUSD that must stay liquid (not in sMUSD). Default is max, so nothing is deployed
+    ///         until the owner sets an explicit floor. Cannot be set below `MIN_LIQUID_MUSD`.
+    ///         `protect()` may still recall sMUSD to repay.
+    uint256 public liquidMusdFloor = type(uint256).max;
+    /// @notice Max sMUSD principal this vault may hold. 0 disables deployment.
+    uint256 public savingsCap;
+    /// @notice Circuit breaker for new savings deposits. Recall and `protect()` keep working.
+    bool public savingsPaused = true;
     uint256 private _locked = 1;
 
     event PolicyUpdated(
@@ -51,6 +67,12 @@ contract LifelineVault {
     event TroveOpened(uint256 collateral, uint256 debt);
     event ReserveFunded(address indexed from, uint256 btc, uint256 musdAmount);
     event ReserveWithdrawn(uint256 btc, uint256 musdAmount);
+    event LiquidFloorUpdated(uint256 floor);
+    event SavingsCapUpdated(uint256 cap);
+    event SavingsPausedSet(bool paused);
+    event SavingsDeployed(uint256 musdDeposited, uint256 smusdBalance);
+    event SavingsRecalled(uint256 smusdBurned);
+    event SavingsYieldClaimed(uint256 musdAmount);
     event Protected(
         address indexed keeper,
         uint256 icrBefore,
@@ -69,6 +91,9 @@ contract LifelineVault {
     error NoActiveTrove();
     error ReserveTooSmall(uint256 icrReachable);
     error TransferFailed();
+    error SavingsMismatch();
+    error SavingsPaused();
+    error FloorBelowMinimum(uint256 floor);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -144,7 +169,9 @@ contract LifelineVault {
 
     /// @notice Close the trove. MUSD needed beyond the vault's reserve is pulled from the owner (approve first).
     ///         All BTC (released collateral + reserve) and leftover MUSD go back to the owner.
+    ///         sMUSD is withdrawn first so principal (and any real claimable yield) is included.
     function closeTrove() external onlyOwner nonReentrant {
+        _recallAllSavings();
         (uint256 debt,) = _debtAndColl();
         uint256 needed = debt - GAS_COMPENSATION;
         uint256 have = musd.balanceOf(address(this));
@@ -155,8 +182,9 @@ contract LifelineVault {
         _sweep();
     }
 
-    /// @notice Claim surplus collateral after a liquidation/redemption in Recovery Mode, and sweep everything.
+    /// @notice Claim surplus collateral after a liquidation or full redemption, and sweep everything.
     function claimAndSweep() external onlyOwner nonReentrant {
+        _recallAllSavings();
         try borrowerOperations.claimCollateral() {} catch {}
         _sweep();
     }
@@ -181,14 +209,67 @@ contract LifelineVault {
         _setPolicy(p);
     }
 
+    /// @notice MUSD that `deployExcessMusd` must leave liquid. Only the owner can change it,
+    ///         and it cannot be set below `MIN_LIQUID_MUSD`.
+    function setLiquidMusdFloor(uint256 floor) external onlyOwner {
+        if (floor < MIN_LIQUID_MUSD) revert FloorBelowMinimum(floor);
+        liquidMusdFloor = floor;
+        emit LiquidFloorUpdated(floor);
+    }
+
+    /// @notice Cap on sMUSD principal this vault will hold. Only the owner.
+    function setSavingsCap(uint256 cap) external onlyOwner {
+        savingsCap = cap;
+        emit SavingsCapUpdated(cap);
+    }
+
+    /// @notice Stop or resume new deposits into the savings vault. Does not block recall or `protect()`.
+    function setSavingsPaused(bool paused) external onlyOwner {
+        savingsPaused = paused;
+        emit SavingsPausedSet(paused);
+    }
+
+    /// @notice Deposit liquid MUSD above `liquidMusdFloor` into the MUSD Savings Vault, up to `savingsCap`.
+    ///         Holds sMUSD. Callable by anyone. Reverts while paused. Returns 0 when there is no room.
+    ///         Principal is 1:1. This does not report or simulate an APY.
+    function deployExcessMusd() external nonReentrant returns (uint256 deposited) {
+        if (savingsPaused) revert SavingsPaused();
+        if (IMUSDSavings(MUSD_SAVINGS).musdToken() != address(musd)) revert SavingsMismatch();
+        uint256 staked = stakedMusd();
+        uint256 room = savingsCap > staked ? savingsCap - staked : 0;
+        uint256 liquid = musd.balanceOf(address(this));
+        uint256 excess = liquid > liquidMusdFloor ? liquid - liquidMusdFloor : 0;
+        deposited = excess < room ? excess : room;
+        if (deposited == 0) return 0;
+        _approveMusd(MUSD_SAVINGS, deposited);
+        IMUSDSavings(MUSD_SAVINGS).deposit(deposited);
+        emit SavingsDeployed(deposited, stakedMusd());
+    }
+
+    /// @notice Pull sMUSD principal back to liquid MUSD. The savings vault also pays any yield it
+    ///         has actually credited. Owner only; keepers recall only inside `protect()`.
+    function recallSavings(uint256 amount) external onlyOwner nonReentrant {
+        if (amount == 0) return;
+        IMUSDSavings(MUSD_SAVINGS).withdraw(amount);
+        emit SavingsRecalled(amount);
+    }
+
+    /// @notice Claim savings yield the protocol has already distributed. Returns 0 when none is due.
+    function claimSavingsYield() external onlyOwner nonReentrant returns (uint256 amount) {
+        amount = IMUSDSavings(MUSD_SAVINGS).claimYield();
+        if (amount > 0) emit SavingsYieldClaimed(amount);
+    }
+
     // ------------------------------------------------------------------
     // Permissionless: protection
     // ------------------------------------------------------------------
 
-    /// @notice Rescue the trove if it is below its (Recovery-Mode-aware) trigger. Callable by anyone.
+    /// @notice Rescue the trove if it is below its trigger. Callable by anyone.
+    ///         Collateral and repayment are applied in one `adjustTrove`, so a mixed BTC+MUSD
+    ///         rescue that is still under 110% after either leg alone does not revert.
     /// @return collAdded BTC moved from reserve into the trove
     /// @return musdRepaid MUSD from reserve used to repay debt
-    /// @return tip BTC paid to msg.sender
+    /// @return tip BTC paid to msg.sender (Lifeline's fee; capped by policy and by MAX_TIP_BPS)
     function protect(address upperHint, address lowerHint)
         external
         nonReentrant
@@ -197,7 +278,7 @@ contract LifelineVault {
         if (troveManager.getTroveStatus(address(this)) != 1) revert NoActiveTrove();
         uint256 price = priceFeed.fetchPrice();
         bool rm = troveManager.checkRecoveryMode(price);
-        (uint256 trigger, uint256 target) = effectiveThresholds(rm);
+        (uint256 trigger, uint256 target) = effectiveThresholds();
         uint256 icrBefore = troveManager.getCurrentICR(address(this), price);
         bool redemption;
         if (icrBefore >= trigger) {
@@ -223,6 +304,8 @@ contract LifelineVault {
 
         uint256 newColl = coll + collAdded;
         uint256 newDebt = debt;
+        uint256 liquidMusd = musd.balanceOf(address(this));
+        uint256 bal = liquidMusd + stakedMusd();
         if (collAdded < collNeeded) {
             // debt the trove can carry at the target ratio with the new collateral
             uint256 maxDebt = (newColl * price) / target;
@@ -230,19 +313,24 @@ contract LifelineVault {
             // mUSD rules: net debt (debt - gas comp) must stay >= minNetDebt
             uint256 floor = borrowerOperations.minNetDebt() + GAS_COMPENSATION;
             uint256 room = debt > floor ? debt - floor : 0;
-            uint256 bal = musd.balanceOf(address(this));
             musdRepaid = _min(want, _min(room, bal));
             newDebt = debt - musdRepaid;
         }
 
-        // The rescue must at least lift the trove out of liquidation range (and out of RM danger).
+        // Liquidation is ICR < 110% in every mode, including Recovery Mode.
+        // A rescue that cannot clear that line reverts so keepers don't spend a partial one.
         uint256 reachable = newDebt == 0 ? type(uint256).max : (newColl * price) / newDebt;
-        uint256 floorICR = rm ? CCR : MCR;
-        if (reachable <= floorICR) revert ReserveTooSmall(reachable);
+        if (reachable <= MCR) revert ReserveTooSmall(reachable);
+        if (collAdded == 0 && musdRepaid == 0) revert ReserveTooSmall(reachable);
 
-        // 2) Execute.
-        if (collAdded > 0) borrowerOperations.addColl{value: collAdded}(upperHint, lowerHint);
-        if (musdRepaid > 0) borrowerOperations.repayMUSD(musdRepaid, upperHint, lowerHint);
+        // 2) Pull sMUSD principal back if the liquid MUSD balance is short, then one adjustTrove.
+        //    Split addColl + repayMUSD reverts in normal mode when each leg is still under 110%.
+        if (musdRepaid > liquidMusd) {
+            uint256 pull = musdRepaid - liquidMusd;
+            IMUSDSavings(MUSD_SAVINGS).withdraw(pull);
+            emit SavingsRecalled(pull);
+        }
+        borrowerOperations.adjustTrove{value: collAdded}(0, musdRepaid, false, upperHint, lowerHint);
 
         // 3) Tip the keeper: tipBps of the rescue's BTC value, capped, paid from what is left.
         uint256 rescueValueBtc = collAdded + (musdRepaid * 1e18) / price;
@@ -258,16 +346,10 @@ contract LifelineVault {
     // Views (used by the keeper bot and the dashboard)
     // ------------------------------------------------------------------
 
-    /// @notice Trigger/target after Recovery-Mode adjustment. In RM, troves under 150% can be liquidated,
-    ///         so the vault treats CCR+5 points as the floor for the trigger.
-    function effectiveThresholds(bool recoveryMode) public view returns (uint256 trigger, uint256 target) {
-        trigger = policy.triggerICR;
-        target = policy.targetICR;
-        if (recoveryMode) {
-            uint256 rmTrigger = CCR + RECOVERY_BUFFER;
-            if (trigger < rmTrigger) trigger = rmTrigger;
-            if (target < trigger + 0.1e18) target = trigger + 0.1e18;
-        }
+    /// @notice The owner's trigger and target. Recovery Mode does not rewrite them: MUSD liquidates
+    ///         only below MCR (110%) in every mode. CCR still gates new borrowing while TCR < 150%.
+    function effectiveThresholds() public view returns (uint256 trigger, uint256 target) {
+        return (policy.triggerICR, policy.targetICR);
     }
 
     /// @notice ICR this trove needs so that at least `redemptionBufferMusd` of OTHER redeemable debt
@@ -307,7 +389,7 @@ contract LifelineVault {
         uint256 debt;
         uint256 reserveBtc;
         uint256 reserveMusd;
-        uint256 liquidationPrice; // BTC price at which ICR == MCR (or CCR in Recovery Mode)
+        uint256 liquidationPrice; // BTC price at which ICR == MCR (110%), in every mode
         uint256 redemptionSafeICR; // 0 if the redemption guard is off
         bool redemptionRisk; // ICR below redemptionSafeICR
     }
@@ -316,18 +398,26 @@ contract LifelineVault {
         h.status = troveManager.getTroveStatus(address(this));
         h.price = priceFeed.fetchPrice();
         h.recoveryMode = troveManager.checkRecoveryMode(h.price);
-        (h.trigger, h.target) = effectiveThresholds(h.recoveryMode);
+        (h.trigger, h.target) = effectiveThresholds();
         h.reserveBtc = address(this).balance;
-        h.reserveMusd = musd.balanceOf(address(this));
+        h.reserveMusd = musd.balanceOf(address(this)) + stakedMusd();
         if (h.status == 1) {
             (h.debt, h.coll) = _debtAndColl();
             h.icr = troveManager.getCurrentICR(address(this), h.price);
             h.redemptionSafeICR = redemptionSafeICR(h.price);
             h.redemptionRisk = h.redemptionSafeICR != 0 && h.icr < h.redemptionSafeICR;
             h.needsProtection = h.icr < h.trigger || h.redemptionRisk;
-            uint256 line = h.recoveryMode ? CCR : MCR;
-            h.liquidationPrice = h.coll == 0 ? 0 : (line * h.debt) / h.coll;
+            h.liquidationPrice = h.coll == 0 ? 0 : (MCR * h.debt) / h.coll;
         }
+    }
+
+    /// @notice sMUSD this vault holds (principal). Yield, if the protocol has distributed any, is
+    ///         `IMUSDSavings.claimableYield` and is not included here.
+    function stakedMusd() public view returns (uint256) {
+        (bool ok, bytes memory data) =
+            MUSD_SAVINGS.staticcall(abi.encodeWithSignature("balanceOf(address)", address(this)));
+        if (!ok || data.length < 32) return 0;
+        return abi.decode(data, (uint256));
     }
 
     // ------------------------------------------------------------------
@@ -346,6 +436,19 @@ contract LifelineVault {
         coll = c; // getEntireDebtAndColl already folds pending collateral into `coll`
         debt = pr + i; // ...and pending principal/interest into principal/interest
         (pc, pp, pi); // silence unused warnings
+    }
+
+    function _recallAllSavings() internal {
+        uint256 s = stakedMusd();
+        if (s == 0) return;
+        IMUSDSavings(MUSD_SAVINGS).withdraw(s);
+        emit SavingsRecalled(s);
+    }
+
+    function _approveMusd(address spender, uint256 amount) internal {
+        (bool ok, bytes memory data) =
+            address(musd).call(abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+        if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
     function _sweep() internal {

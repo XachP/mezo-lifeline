@@ -19,7 +19,7 @@ img.shot { border:2px solid #2a2a36; border-radius:18px; width:980px }
 <p class="m" style="font-size:30px;margin-top:40px">Mezo Buildathon · Track 1 DeFi + Track 2 Access &amp; Distribution</p></div><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>1 / 11</span></div></section>
 
 <section class="s"><h2>Two ways an MUSD borrower loses BTC</h2>
-<div class="cols"><div class="box"><p class="big r" style="margin:0">Liquidation</p><ul><li>Under <b class="r">110% ICR</b>, or under <b class="r">150%</b> in Recovery Mode</li><li>BTC falls 20–30% in days</li><li>Today's defense is to top up by hand at 3 AM</li></ul></div>
+<div class="cols"><div class="box"><p class="big r" style="margin:0">Liquidation</p><ul><li>Only under <b class="r">110% ICR</b>, in normal mode and in Recovery Mode</li><li>BTC falls 20–30% in days</li><li>Today's defense is to top up by hand at 3 AM</li></ul></div>
 <div class="box"><p class="big y" style="margin:0">Redemption</p><ul><li>MUSD is swapped for BTC from the <b>lowest-ICR troves ≥ 110%</b> first</li><li>Live testnet today: the front of the queue is at <b>114–131%</b></li><li>At 127% ICR, only <b>~18.6k MUSD</b> of debt stands in front of you</li></ul></div></div>
 <p class="y">Fear of both keeps BTC holders from borrowing MUSD at all.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>2 / 11</span></div></section>
 
@@ -27,7 +27,7 @@ img.shot { border:2px solid #2a2a36; border-radius:18px; width:980px }
 <div class="cols"><div class="box"><p><b>LifelineVault</b>: a smart account that is the borrower of record for one MUSD trove.</p>
 <p>The owner parks a small <b>BTC and/or MUSD rescue reserve</b> and sets a policy:<br><span class="m">trigger · target · keeper tip (≤ 2%, capped) · redemption buffer</span></p></div>
 <div class="box"><p><b>protect()</b> is permissionless. It fires when ICR &lt; trigger <b>or</b> the trove is inside the redemption buffer:</p>
-<ul><li>adds BTC (<code>addColl</code>) or repays (<code>repayMUSD</code>)</li><li>lifts the trove to safety, again and again</li><li>pays the caller a capped tip</li></ul></div></div>
+<ul><li>one <code>adjustTrove</code>: add BTC and repay MUSD together</li><li>lifts the trove to safety, again and again</li><li>pays the caller a capped tip</li></ul></div></div>
 <p class="m" style="font-size:31px">Keepers can only move the reserve <b>into the owner's own trove</b>. Withdrawals, borrowing and closing stay owner-only. Works for smart accounts; no one-shot pre-signed signatures.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>3 / 11</span></div></section>
 
 <section class="s"><h2>How it plugs into mUSD</h2>
@@ -37,7 +37,7 @@ img.shot { border:2px solid #2a2a36; border-radius:18px; width:980px }
 <div class="flow" style="margin-top:50px"><div class="node">Any keeper<br><span class="m" style="font-size:26px">bot, Telegram, or you</span></div><div class="arrow">→</div>
 <div class="node">protect(hints)<br><span class="m" style="font-size:26px">PriceFeed · TroveManager · SortedTroves</span></div><div class="arrow">→</div>
 <div class="node">Safe again<br><span class="m" style="font-size:26px">tip ≤ min(2%, cap)</span></div></div>
-<ul style="margin-top:40px"><li><b>Recovery-Mode aware</b>: the trigger rises to ≥155% when system TCR &lt; 150%</li>
+<ul style="margin-top:40px"><li><b>Recovery Mode</b>: TCR under 150% restricts new borrowing. Liquidation stays at 110%, and the owner's trigger is not rewritten</li>
 <li><b>Exact HintHelpers hints</b>: opening on the 280-trove list costs ~0.66M gas instead of 6.3M</li><li>A rescue that can't clear the liquidation line reverts instead of wasting funds</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>4 / 11</span></div></section>
 
 <section class="s"><h2>Demo 1: a 45% BTC crash on real mUSD contracts</h2>
@@ -84,22 +84,23 @@ policy tightened to trigger 140% / target 150%          tx 0xeb93cddc...bdec
 <tr class="m"><td style="padding:12px 0"></td><td>Alerts only</td><td>One-shot pre-signed rescue</td><td><b class="r">Lifeline</b></td></tr>
 <tr><td style="padding:12px 0">Acts while you sleep</td><td class="m">no</td><td class="m">once</td><td class="g">every time</td></tr>
 <tr><td style="padding:12px 0">Rescue asset</td><td class="m">–</td><td class="m">repay MUSD</td><td class="g">add BTC and/or repay</td></tr>
-<tr><td style="padding:12px 0">Recovery Mode (150%)</td><td class="m">warn</td><td class="m">no</td><td class="g">trigger auto-raised</td></tr>
+<tr><td style="padding:12px 0">Recovery Mode (TCR &lt; 150%)</td><td class="m">warn</td><td class="m">no</td><td class="g">liquidation stays 110%</td></tr>
 <tr><td style="padding:12px 0">Redemption queue</td><td class="m">monitor</td><td class="m">monitor</td><td class="g">on-chain guard</td></tr>
 <tr><td style="padding:12px 0">Smart accounts / Passport</td><td class="m">–</td><td class="m">EOA signature</td><td class="g">any owner</td></tr>
-<tr><td style="padding:12px 0">Fork tests vs live mUSD</td><td class="m">–</td><td class="m">–</td><td class="g"><b>16 / 16</b></td></tr></table>
+<tr><td style="padding:12px 0">Fork tests vs live mUSD</td><td class="m">–</td><td class="m">–</td><td class="g"><b>20 / 20</b></td></tr></table>
 <p class="m" style="font-size:28px">No admin, no upgrade keys, reentrancy guarded, double-capped tip, MIT, CI on every push. Not audited yet: testnet first.</p><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>9 / 11</span></div></section>
 
 <section class="s"><h2>Why it grows MUSD</h2>
 <ul><li><b>More borrowing</b>: holders who fear liquidation <i>and</i> redemption can borrow with a standing safety net</li>
 <li><b>Distribution</b>: an open-source keeper with Telegram alerts meets users where they already are (Track 2)</li>
 <li><b>Composable</b>: built on the deployed mUSD contracts, with no protocol changes</li>
-<li><b>Revenue path</b>: an optional, owner-chosen service fee on rescues; keepers earn tips</li>
-<li><b>Wave 2</b>: auto-deleverage through a Mezo pool (no idle reserve), MUSD savings yield on the reserve, one-click migration of existing troves, a hosted alert bot, then mainnet after review</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>10 / 11</span></div></section>
+<li><b>Revenue</b>: the keeper tip on <code>protect()</code> (owner-set, hard-capped at 2%). Lifeline earns it by running a keeper; anyone else can earn the same tip</li>
+<li><b>Productive reserve</b>: MUSD above a liquid floor is deposited to the MUSD Savings Vault (sMUSD) on testnet. One-click migration and mainnet still come after review</li></ul><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>10 / 11</span></div></section>
 
 <section class="s"><div style="margin-top:150px"><h1>Life<span>line</span></h1>
 <p style="font-size:46px">Never get liquidated, or redeemed, in your sleep.</p>
 <p class="m">Code, tests, keeper and demo: <b>github.com/XachP/mezo-lifeline</b><br>Live dashboard: <b>xachp.github.io/mezo-lifeline</b><br>Mezo testnet factory: <b>0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149</b></p>
+<p class="m" style="font-size:28px">Team: Zachary Plumey · @XachP</p>
 <p class="m" style="font-size:28px">Built with an AI coding agent and reviewed by the submitter. MIT licensed.</p></div><div class="foot"><span>Lifeline · liquidation + redemption protection for MUSD</span><span>11 / 11</span></div></section>
 
 <script>

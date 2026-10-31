@@ -4,7 +4,8 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {LifelineVault} from "../src/LifelineVault.sol";
 import {LifelineFactory} from "../src/LifelineFactory.sol";
-import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves} from "../src/interfaces/IMezo.sol";
+import {ExternalKeeper} from "../src/ExternalKeeper.sol";
+import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves, IMUSDSavings} from "../src/interfaces/IMezo.sol";
 
 /// Fork tests against the REAL mUSD deployment on Mezo testnet (chain 31611).
 /// The only thing mocked is PriceFeed.fetchPrice(): Mezo's oracle is a chain precompile that a local
@@ -16,6 +17,7 @@ contract LifelineForkTest is Test {
     IPriceFeed constant PF = IPriceFeed(0x86bCF0841622a5dAC14A313a15f96A95421b9366);
     IERC20Min constant MUSD = IERC20Min(0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503);
     ISortedTroves constant ST = ISortedTroves(0x722E4D24FD6Ff8b0AC679450F3D91294607268fA);
+    IMUSDSavings constant SAVINGS = IMUSDSavings(0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16);
 
     uint256 constant P0 = 84_000e18; // starting BTC price
     LifelineFactory factory;
@@ -44,6 +46,16 @@ contract LifelineForkTest is Test {
 
     function icr() internal view returns (uint256) {
         return TM.getCurrentICR(address(vault), PF.fetchPrice());
+    }
+
+    function _debtColl() internal view returns (uint256 debt, uint256 coll) {
+        (uint256 c, uint256 pr, uint256 i,,,) = TM.getEntireDebtAndColl(address(vault));
+        coll = c;
+        debt = pr + i;
+    }
+
+    function _ceil(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a == 0 ? 0 : (a - 1) / b + 1;
     }
 
     // ---------------------------------------------------------------- basics
@@ -119,19 +131,227 @@ contract LifelineForkTest is Test {
         assertGt(icr(), 1.3e18, "out of danger");
     }
 
-    function test_Protect_recoveryModeRaisesTheBar() public {
+    function test_RecoveryMode_liquidatesOnlyBelow110() public {
+        // Bob matches Alice. Then pick a price that puts Bob under 110% and the system under 150% TCR.
+        address bob = makeAddr("bob");
+        vm.deal(bob, 1 ether);
+        vm.prank(bob);
+        BO.openTrove{value: 0.06 ether}(2_000e18, address(0), address(0));
+        uint256 bobIcr0 = TM.getCurrentICR(bob, P0);
+        uint256 p = (P0 * 1.05e18) / bobIcr0;
+
+        // Top Alice up so she sits around 125% at that price: under 150%, above the 110% liquidation line.
+        (uint256 debt, uint256 coll) = _debtColl();
+        uint256 wantColl = (1.25e18 * debt) / p + 1;
         vm.prank(alice);
-        vault.fundReserve{value: 0.05 ether}(0);
-        // System TCR on testnet is ~300%; a 55% crash pushes the whole system into Recovery Mode (<150%).
-        setPrice((P0 * 45) / 100);
-        assertTrue(TM.checkRecoveryMode(PF.fetchPrice()), "system in recovery mode");
-        (uint256 trig, uint256 tgt) = vault.effectiveThresholds(true);
-        assertEq(trig, 1.55e18);
-        assertEq(tgt, 1.65e18);
+        vault.addColl{value: wantColl - coll}(address(0), address(0));
+        setPrice(p);
+
+        assertTrue(TM.checkRecoveryMode(p), "system in recovery mode");
+        assertLt(TM.getCurrentICR(bob, p), 1.1e18, "bob is under 110%");
+        uint256 ratio = icr();
+        assertGt(ratio, 1.1e18, "alice is above the liquidation line");
+        assertLt(ratio, 1.5e18, "alice is under the old 150% recovery-mode line");
+
+        (uint256 trig, uint256 tgt) = vault.effectiveThresholds();
+        assertEq(trig, 1.3e18, "owner trigger is not rewritten in recovery mode");
+        assertEq(tgt, 1.6e18);
+        LifelineVault.Health memory h = vault.health();
+        assertTrue(h.recoveryMode);
+        assertApproxEqRel(h.liquidationPrice, (1.1e18 * h.debt) / h.coll, 1e14);
+
+        address liquidator = makeAddr("liquidator");
+        vm.prank(liquidator);
+        vm.expectRevert();
+        TM.liquidate(address(vault));
+        assertEq(TM.getTroveStatus(address(vault)), 1, "125% trove survives recovery mode");
+
+        vm.prank(liquidator);
+        TM.liquidate(bob);
+        assertEq(TM.getTroveStatus(bob), 3, "under 110% is liquidated in recovery mode");
+    }
+
+    function test_Protect_mixedAssetsBelow110_singleAdjustTrove() public {
+        // Leave the trove near 105% in normal mode, with a BTC slice and an MUSD slice that each
+        // miss 110% on their own. Together they clear it. Split addColl/repayMUSD reverts.
+        vm.prank(alice);
+        vault.withdrawColl(0.01 ether, address(0), address(0));
+        uint256 price = (P0 * 55) / 100;
+        setPrice(price);
+        assertFalse(TM.checkRecoveryMode(price));
+        (uint256 debt, uint256 coll) = _debtColl();
+        assertLt((coll * price) / debt, 1.1e18);
+
+        uint256 collFor109 = _ceil(1.09e18 * debt, price);
+        uint256 btcPiece = collFor109 - coll;
+        uint256 debtFor109 = (coll * price) / 1.09e18;
+        uint256 musdPiece = debt - debtFor109;
+        assertGt(btcPiece, 0);
+        assertGt(musdPiece, 0);
+        assertLt(((coll + btcPiece) * price) / debt, 1.1e18, "BTC leg alone stays under 110%");
+        assertLt((coll * price) / (debt - musdPiece), 1.1e18, "MUSD leg alone stays under 110%");
+        assertGt(((coll + btcPiece) * price) / (debt - musdPiece), 1.1e18, "both legs clear 110%");
+
+        uint256 snap = vm.snapshotState();
+        vm.deal(address(vault), btcPiece);
+        vm.prank(address(vault));
+        (bool addOk,) = address(BO).call{value: btcPiece}(
+            abi.encodeWithSignature("addColl(address,address)", address(0), address(0))
+        );
+        assertFalse(addOk, "addColl alone reverts under 110%");
+        vm.revertToState(snap);
+
+        deal(address(MUSD), address(vault), musdPiece);
+        vm.prank(address(vault));
+        (bool repayOk,) = address(BO).call(
+            abi.encodeWithSignature("repayMUSD(uint256,address,address)", musdPiece, address(0), address(0))
+        );
+        assertFalse(repayOk, "repayMUSD alone reverts under 110%");
+        vm.revertToState(snap);
+
+        vm.deal(address(vault), btcPiece + 0.0005 ether); // tip cap stays out of the collateral budget
+        deal(address(MUSD), address(vault), musdPiece);
+        vm.prank(keeper);
+        (uint256 added, uint256 repaid,) = vault.protect(address(0), address(0));
+        assertEq(added, btcPiece, "whole BTC slice went in");
+        assertEq(repaid, musdPiece, "whole MUSD slice repaid");
+        assertGt(icr(), 1.1e18, "single adjustTrove cleared 110%");
+
+        address liquidator = makeAddr("liquidator");
+        vm.prank(liquidator);
+        vm.expectRevert();
+        TM.liquidate(address(vault));
+        assertEq(TM.getTroveStatus(address(vault)), 1);
+    }
+
+    function test_Protect_repaysMUSDBelow110_andSurvivesLiquidation() public {
+        vm.startPrank(alice);
+        vault.withdrawColl(0.01 ether, address(0), address(0));
+        MUSDapprove(alice, address(vault), type(uint256).max);
+        vault.fundReserve(1_500e18);
+        vm.stopPrank();
+
+        setPrice((P0 * 55) / 100);
+        assertLt(icr(), 1.1e18, "liquidatable before the keeper");
+        assertEq(address(vault).balance, 0, "no BTC reserve");
 
         vm.prank(keeper);
-        vault.protect(address(0), address(0));
-        assertGe(icr(), 1.649e18, "lifted above the RM danger line");
+        (uint256 added, uint256 repaid,) = vault.protect(address(0), address(0));
+        assertEq(added, 0);
+        assertGt(repaid, 0, "repaid with MUSD");
+        assertGt(icr(), 1.1e18, "out of liquidation range");
+
+        address liquidator = makeAddr("liquidator");
+        vm.prank(liquidator);
+        vm.expectRevert();
+        TM.liquidate(address(vault));
+        assertEq(TM.getTroveStatus(address(vault)), 1);
+    }
+
+    function test_ExternalKeeper_repaysMUSDBelow110() public {
+        ExternalKeeper bot = new ExternalKeeper(keeper);
+        vm.startPrank(alice);
+        vault.withdrawColl(0.01 ether, address(0), address(0));
+        MUSDapprove(alice, address(vault), type(uint256).max);
+        vault.fundReserve{value: 0.0001 ether}(1_500e18);
+        vm.stopPrank();
+
+        setPrice((P0 * 55) / 100);
+        assertLt(icr(), 1.1e18, "liquidatable before the external keeper");
+
+        vm.prank(keeper);
+        (uint256 added, uint256 repaid, uint256 tip) = bot.rescue(vault, address(0), address(0));
+        assertEq(added, 0, "BTC reserve was only the tip budget");
+        assertGt(repaid, 0, "external contract repaid MUSD");
+        assertGt(tip, 0);
+        assertEq(address(bot).balance, tip, "tip paid to the external keeper");
+        assertGt(icr(), 1.1e18);
+
+        vm.prank(mallory);
+        vm.expectRevert(ExternalKeeper.NotOperator.selector);
+        bot.withdrawTip(payable(mallory));
+        uint256 keeperBefore = keeper.balance;
+        vm.prank(keeper);
+        bot.withdrawTip(payable(keeper));
+        assertEq(keeper.balance, keeperBefore + tip);
+
+        address liquidator = makeAddr("liquidator");
+        vm.prank(liquidator);
+        vm.expectRevert();
+        TM.liquidate(address(vault));
+        assertEq(TM.getTroveStatus(address(vault)), 1);
+    }
+
+    function test_Savings_deploysExcessAboveFloor_andProtectRecallsIt() public {
+        assertEq(SAVINGS.musdToken(), address(MUSD), "savings vault is the matsnet MUSD one");
+        vm.startPrank(alice);
+        MUSDapprove(alice, address(vault), type(uint256).max);
+        vault.fundReserve(1_000e18);
+        vm.stopPrank();
+
+        // Paused by default, so a keeper cannot move the reserve even after it is funded.
+        vm.expectRevert(LifelineVault.SavingsPaused.selector);
+        vault.deployExcessMusd();
+        assertEq(MUSD.balanceOf(address(vault)), 1_000e18);
+
+        vm.prank(mallory);
+        vm.expectRevert(LifelineVault.NotOwner.selector);
+        vault.setLiquidMusdFloor(200e18);
+        vm.prank(mallory);
+        vm.expectRevert(LifelineVault.NotOwner.selector);
+        vault.setSavingsPaused(false);
+        vm.prank(mallory);
+        vm.expectRevert(LifelineVault.NotOwner.selector);
+        vault.recallSavings(1);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(LifelineVault.FloorBelowMinimum.selector, uint256(0)));
+        vault.setLiquidMusdFloor(0);
+        vm.prank(alice);
+        vault.setLiquidMusdFloor(200e18);
+
+        // Paused by default, and the cap starts at 0. Both block deployment.
+        vm.expectRevert(LifelineVault.SavingsPaused.selector);
+        vault.deployExcessMusd();
+        vm.prank(alice);
+        vault.setSavingsPaused(false);
+        assertEq(vault.deployExcessMusd(), 0, "cap is 0");
+        vm.prank(alice);
+        vault.setSavingsCap(100e18);
+        assertEq(vault.deployExcessMusd(), 100e18, "cap binds");
+        vm.prank(alice);
+        vault.setSavingsCap(800e18);
+        uint256 deployed = vault.deployExcessMusd();
+        assertEq(deployed, 700e18);
+        assertEq(vault.stakedMusd(), 800e18, "vault holds sMUSD");
+        assertEq(SAVINGS.balanceOf(address(vault)), 800e18);
+        assertEq(MUSD.balanceOf(address(vault)), 200e18, "floor stayed liquid");
+        vm.prank(alice);
+        vault.setSavingsPaused(true);
+        vm.expectRevert(LifelineVault.SavingsPaused.selector);
+        vault.deployExcessMusd();
+        vm.prank(alice);
+        vault.setSavingsPaused(false);
+        assertEq(vault.deployExcessMusd(), 0, "cannot deploy the floor");
+        // Exercise the real claim path. A fresh deposit often has nothing credited; do not require yield.
+        vm.prank(alice);
+        vault.claimSavingsYield();
+
+        // Drop under the 130% trigger but keep the trove above 110%, and give it no BTC reserve.
+        // Repaying up to 160% needs more than the 200 MUSD floor, so protect must recall sMUSD.
+        // The circuit breaker stays shut: recall for a rescue is not a new deposit.
+        vm.prank(alice);
+        vault.setSavingsPaused(true);
+        setPrice((P0 * 55) / 100);
+        assertGt(icr(), 1.1e18);
+        assertLt(icr(), 1.3e18);
+        uint256 stakedBefore = vault.stakedMusd();
+        vm.prank(keeper);
+        (uint256 added, uint256 repaid,) = vault.protect(address(0), address(0));
+        assertEq(added, 0);
+        assertGt(repaid, 200e18, "repay used more than the liquid floor");
+        assertLt(vault.stakedMusd(), stakedBefore, "sMUSD was recalled into the trove");
+        assertGt(icr(), 1.3e18);
     }
 
     function test_Protect_revertsIfReserveCannotSave() public {
@@ -243,28 +463,36 @@ contract LifelineForkTest is Test {
     }
 
     function test_RedemptionGuard_movesTroveBehindTheQueue_andRedemptionHitsOthers() public {
-        // Alice's vault sits at ~127% ICR: far from liquidation (trigger 120%), but it's near the FRONT of
-        // the real testnet redemption queue, where redemptions take BTC from the lowest-ICR troves >= 110%.
+        // Sit just above 112% so Alice is at the front of the live queue. The testnet list moves,
+        // so the redemption size is "debt already in front, plus 5,000 MUSD" rather than a fixed 20k
+        // that no longer reaches a 127% trove.
+        (uint256 debt, uint256 coll) = _debtColl();
+        uint256 want = (1.12e18 * debt) / P0 + 1;
         vm.startPrank(alice);
-        vault.withdrawColl(0.06 ether - 0.0334 ether, address(0), address(0));
+        vault.withdrawColl(coll - want, address(0), address(0));
         vault.fundReserve{value: 0.05 ether}(0);
         vm.stopPrank();
         uint256 before = icr();
-        assertLt(before, 1.3e18);
-        assertGt(before, 1.2e18);
+        assertGt(before, 1.11e18);
+        assertLt(before, 1.2e18);
 
-        // Control: WITHOUT the guard, the same 20,000 MUSD redemption takes some of Alice's BTC.
+        uint256 ahead = _debtAheadOf(before);
+        uint256 redeemAmt = ahead + 5_000e18;
+        uint128 buffer = uint128(ahead + 15_000e18);
         address redeemer = makeAddr("redeemer");
-        deal(address(MUSD), redeemer, 20_000e18);
+        deal(address(MUSD), redeemer, redeemAmt);
+
+        // Control: WITHOUT the guard, that redemption takes some of Alice's BTC.
         uint256 snap = vm.snapshotState();
         (uint256 c0,,,,,) = TM.getEntireDebtAndColl(address(vault));
         vm.prank(redeemer);
-        TM.redeemCollateral(20_000e18, address(0), address(0), address(0), 0, 0);
+        TM.redeemCollateral(redeemAmt, address(0), address(0), address(0), 0, 0);
         (uint256 c1,,,,,) = TM.getEntireDebtAndColl(address(vault));
         assertLt(c1, c0, "control: unguarded, Alice gets redeemed");
         vm.revertToState(snap);
 
-        _setRedemptionGuard(25_000e18); // keep >= 25,000 MUSD of other troves' debt in front of me
+        vm.prank(alice);
+        vault.setPolicy(LifelineVault.Policy(1.111e18, 1.25e18, 50, 0.0005 ether, buffer));
         uint256 safe = vault.redemptionSafeICR(P0);
         assertGt(safe, before, "guard says: too close to the front of the queue");
         assertTrue(vault.health().redemptionRisk);
@@ -280,13 +508,29 @@ contract LifelineForkTest is Test {
         vm.expectRevert();
         vault.protect(address(0), address(0));
 
-        // A real 20,000 MUSD redemption now runs against the live testnet trove list.
+        // The same redemption now runs against the live testnet trove list.
         (uint256 collBefore,,,,,) = TM.getEntireDebtAndColl(address(vault));
         vm.prank(redeemer);
-        TM.redeemCollateral(20_000e18, address(0), address(0), address(0), 0, 0);
-        assertLt(MUSD.balanceOf(redeemer), 20_000e18, "redemption happened");
+        TM.redeemCollateral(redeemAmt, address(0), address(0), address(0), 0, 0);
+        assertLt(MUSD.balanceOf(redeemer), redeemAmt, "redemption happened");
         (uint256 collAfter,,,,,) = TM.getEntireDebtAndColl(address(vault));
         assertEq(collAfter, collBefore, "Alice's BTC untouched by the redemption");
+    }
+
+    /// @notice Other troves' redeemable debt (ICR >= 110% and below `icrLine`) in front of this vault.
+    function _debtAheadOf(uint256 icrLine) internal view returns (uint256 acc) {
+        address cur = ST.getLast();
+        for (uint256 i; i < 80 && cur != address(0); i++) {
+            if (cur != address(vault)) {
+                uint256 cr = TM.getCurrentICR(cur, P0);
+                if (cr >= 1.1e18) {
+                    if (cr >= icrLine) break;
+                    (, uint256 pr, uint256 it,, uint256 pp, uint256 pi) = TM.getEntireDebtAndColl(cur);
+                    acc += pr + it + pp + pi;
+                }
+            }
+            cur = ST.getPrev(cur);
+        }
     }
 
     function test_RedemptionGuard_healthyWhenAlreadyBehind() public {
