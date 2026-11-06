@@ -49,7 +49,7 @@
       <tr><td>Keeper steps in at BTC price</td><td id="oTrigP">-</td></tr>
       <tr><td>Extra drawdown survived</td><td id="oExtra">-</td></tr>
     </table>
-    <p class="mut" style="font-size:12.5px">Model: mUSD liquidates below 110% ICR (150% if the whole system enters Recovery Mode; the vault raises its trigger to 155% automatically then). Multiple rescues can happen on the way down; this shows the floor once the whole reserve is in the trove.</p>
+    <p class="mut" style="font-size:12.5px">Model: mUSD liquidates only below 110% ICR, including in Recovery Mode. The owner's trigger is not rewritten when system TCR drops under 150%. Multiple rescues can happen on the way down; this shows the floor once the whole reserve is in the trove.</p>
   </section>
 
   <section class="card wide">

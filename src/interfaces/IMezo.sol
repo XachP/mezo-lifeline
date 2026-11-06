@@ -8,6 +8,15 @@ interface IBorrowerOperations {
     function withdrawColl(uint256 amount, address upperHint, address lowerHint) external;
     function withdrawMUSD(uint256 amount, address upperHint, address lowerHint) external;
     function repayMUSD(uint256 amount, address upperHint, address lowerHint) external;
+    /// @notice Collateral top-up (msg.value) and/or debt change in one trove update.
+    ///         `_collWithdrawal` must be 0 when msg.value is positive. `_isDebtIncrease` false repays.
+    function adjustTrove(
+        uint256 collWithdrawal,
+        uint256 debtChange,
+        bool isDebtIncrease,
+        address upperHint,
+        address lowerHint
+    ) external payable;
     function closeTrove() external;
     function claimCollateral() external;
     function minNetDebt() external view returns (uint256);
@@ -57,6 +66,17 @@ interface ISortedTroves {
     function getPrev(address id) external view returns (address);
     function getNext(address id) external view returns (address);
     function getSize() external view returns (uint256);
+}
+
+/// @notice Mezo MUSD Savings Rate. Deposits mint sMUSD 1:1; yield is separate and claimable.
+///         Testnet proxy: 0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16 (musdToken = matsnet MUSD).
+interface IMUSDSavings {
+    function deposit(uint256 amount) external;
+    function withdraw(uint256 amount) external;
+    function claimYield() external returns (uint256);
+    function claimableYield(address holder) external view returns (uint256);
+    function musdToken() external view returns (address);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 interface IHintHelpers {
