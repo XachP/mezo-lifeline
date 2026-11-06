@@ -29,7 +29,7 @@ contract LifelineForkTest is Test {
     function setUp() public {
         vm.createSelectFork("mezo_testnet");
         setPrice(P0);
-        factory = new LifelineFactory(BO, TM, PF, MUSD, ST);
+        factory = new LifelineFactory(BO, TM, PF, MUSD, ST, SAVINGS);
         vm.deal(alice, 10 ether); // "ether" = 1e18 units of native BTC on Mezo
         vm.prank(alice);
         vault = factory.createVault(
@@ -352,6 +352,93 @@ contract LifelineForkTest is Test {
         assertGt(repaid, 200e18, "repay used more than the liquid floor");
         assertLt(vault.stakedMusd(), stakedBefore, "sMUSD was recalled into the trove");
         assertGt(icr(), 1.3e18);
+    }
+
+    /// @notice Real MUSD Savings Rate yield: the index moves and the sMUSD balance does not.
+    ///         Share-balance accounting cannot clear 110%. Claiming the credited yield can.
+    function test_Protect_accruedSavingsYieldClearsLineSharesCannot() public {
+        uint256 shares = 20e18;
+        _parkSavingsPrincipal(shares);
+        _creditProtocolYield(100e18);
+        assertEq(vault.stakedMusd(), shares, "yield does not mint sMUSD");
+        assertEq(MUSD.balanceOf(address(vault)), 0, "principal is in sMUSD, yield is not liquid yet");
+        uint256 yield = vault.unclaimedSavingsYield();
+        assertGt(yield, 1e18, "protocol yield was credited to this vault");
+        assertEq(vault.savingsMusd(), shares + yield);
+        assertEq(vault.health().reserveMusd, shares + yield, "backing includes credited yield, not a market price");
+
+        (uint256 debt, uint256 coll) = _debtColl();
+        uint256 floorDebt = BO.minNetDebt() + vault.GAS_COMPENSATION();
+        uint256 room = debt - floorDebt;
+        assertGt(room, shares, "there is repay room the share balance does not fill");
+        uint256 repayNew = shares + yield < room ? shares + yield : room;
+        assertGt(repayNew, shares);
+
+        // Price where repaying only the share balance lands on 110% (old code reverts:
+        // reachable <= MCR) and repaying principal plus credited yield clears it.
+        uint256 price = (vault.MCR() * (debt - shares)) / coll;
+        setPrice(price);
+        uint256 oldReach = (coll * price) / (debt - shares);
+        uint256 newReach = (coll * price) / (debt - repayNew);
+        assertLe(oldReach, vault.MCR(), "old accounting cannot clear 110%");
+        assertGt(newReach, vault.MCR(), "credited yield can clear 110%");
+        assertLt(icr(), vault.MCR(), "liquidatable before the keeper");
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(keeper);
+        (, uint256 repaid,) = vault.protect(address(0), address(0));
+        assertGt(repaid, shares, "repay used credited yield, not just the sMUSD balance");
+        assertEq(vault.unclaimedSavingsYield(), 0, "yield was claimed into the rescue");
+        assertGt(icr(), vault.MCR());
+        _assertSurvivesLiquidation();
+
+        vm.revertToState(snap);
+        ExternalKeeper bot = new ExternalKeeper(keeper);
+        vm.prank(keeper);
+        (, repaid,) = bot.rescue(vault, address(0), address(0));
+        assertGt(repaid, shares, "external keeper rescue uses the same yield");
+        assertEq(address(bot).balance, 0, "no BTC was left to tip");
+        assertGt(icr(), vault.MCR());
+        _assertSurvivesLiquidation();
+    }
+
+    function _parkSavingsPrincipal(uint256 shares) internal {
+        vm.startPrank(alice);
+        MUSDapprove(alice, address(vault), type(uint256).max);
+        vault.fundReserve(shares + vault.MIN_LIQUID_MUSD());
+        vault.setLiquidMusdFloor(vault.MIN_LIQUID_MUSD());
+        vault.setSavingsPaused(false);
+        vault.setSavingsCap(shares);
+        assertEq(vault.deployExcessMusd(), shares);
+        vault.withdrawReserve(0, vault.MIN_LIQUID_MUSD());
+        vault.setSavingsPaused(true);
+        vm.stopPrank();
+        assertEq(address(vault).balance, 0, "no BTC reserve");
+        assertEq(MUSD.balanceOf(address(vault)), 0);
+        assertEq(vault.stakedMusd(), shares);
+        assertEq(address(vault.savings()), address(SAVINGS));
+    }
+
+    /// @dev `receiveProtocolYield` is the live vault's distribution path. The sMUSD supply
+    ///      is the whole testnet's, so the donation is sized off that supply. Fork only.
+    function _creditProtocolYield(uint256 wantYield) internal {
+        uint256 supply = SAVINGS.totalSupply();
+        uint256 shares = vault.stakedMusd();
+        uint256 amount = (wantYield * supply) / shares + supply;
+        address donor = makeAddr("yieldDonor");
+        deal(address(MUSD), donor, amount);
+        vm.startPrank(donor);
+        MUSDapprove(donor, address(SAVINGS), amount);
+        SAVINGS.receiveProtocolYield(amount);
+        vm.stopPrank();
+    }
+
+    function _assertSurvivesLiquidation() internal {
+        address liquidator = makeAddr("liquidator");
+        vm.prank(liquidator);
+        vm.expectRevert();
+        TM.liquidate(address(vault));
+        assertEq(TM.getTroveStatus(address(vault)), 1);
     }
 
     function test_Protect_revertsIfReserveCannotSave() public {

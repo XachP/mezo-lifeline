@@ -68,8 +68,14 @@ interface ISortedTroves {
     function getSize() external view returns (uint256);
 }
 
-/// @notice Mezo MUSD Savings Rate. Deposits mint sMUSD 1:1; yield is separate and claimable.
-///         Testnet proxy: 0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16 (musdToken = matsnet MUSD).
+/// @notice Mezo MUSD Savings Rate (`MUSDSavingsRate`), verified on Mezo testnet at
+///         0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16. Not ERC-4626: there is no
+///         `convertToAssets`. `deposit` mints sMUSD 1:1 and `withdraw` burns sMUSD 1:1
+///         for principal. Yield is a separate index (`yieldIndex`); the sMUSD balance
+///         does not increase when yield accrues. `withdraw` pays principal and also
+///         claims yield. `claimableYield` is the stored checkpoint only — pending
+///         index yield is `shares * (yieldIndex - supplyYieldIndex) / 1e18` until the
+///         next update. sMUSD has no market price in this interface.
 interface IMUSDSavings {
     function deposit(uint256 amount) external;
     function withdraw(uint256 amount) external;
@@ -77,6 +83,13 @@ interface IMUSDSavings {
     function claimableYield(address holder) external view returns (uint256);
     function musdToken() external view returns (address);
     function balanceOf(address account) external view returns (uint256);
+    function totalSupply() external view returns (uint256);
+    function yieldIndex() external view returns (uint256);
+    function supplyYieldIndex(address account) external view returns (uint256);
+    /// @notice Pull strategy yield into the index. Permissionless. No-op when none is due.
+    function receiveYieldFromStrategy() external;
+    /// @notice Distribute `amount` MUSD (pulled from the caller) across sMUSD holders.
+    function receiveProtocolYield(uint256 amount) external;
 }
 
 interface IHintHelpers {

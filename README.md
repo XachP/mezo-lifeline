@@ -21,7 +21,7 @@ Built for the **Mezo Buildathon** (AKINDO). Tracks: **DeFi** (MUSD borrowing saf
 | Demo | `demo/local-demo.sh` runs on a local fork. Part 1: a 45% BTC crash where the unprotected trove is liquidated and the Lifeline trove survives. Part 2: a 20,000 MUSD redemption hits other troves and leaves the guarded trove's BTC untouched ([sample output](demo/sample-output.txt)) |
 | Keeper | `keeper/keeper.mjs`. A permissionless rescue bot that computes exact sorted-list hints, pauses on a stale oracle, and can send Telegram alerts |
 | Dashboard | `docs/index.html` (GitHub Pages). It has a crash simulator, a **live redemption-queue radar**, wallet actions with exact hints, and a read-only vault watcher |
-| Testnet | **Live on Mezo testnet**: LifelineFactory [`0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149`](https://explorer.test.mezo.org/address/0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149), demo vault [`0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF`](https://explorer.test.mezo.org/address/0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF) with real rescue txs (see "Deployments") |
+| Testnet | **Live Wave 1 on Mezo testnet**: LifelineFactory [`0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149`](https://explorer.test.mezo.org/address/0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149), demo vault [`0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF`](https://explorer.test.mezo.org/address/0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF). Wave 2 in this repo is not that deployment. See [TESTERS.md](TESTERS.md) |
 
 ## Why
 
@@ -47,17 +47,17 @@ Today the protection is to watch the chart and the queue, then top up by hand. L
 
 1. `LifelineFactory.createVault(policy)` deploys a `LifelineVault` that you own. The policy has five fields: `triggerICR`, `targetICR`, `tipBps` (≤ 2%), `maxTipWei`, and `redemptionBufferMusd` (0 turns the guard off).
 2. `vault.openTrove{value: coll + reserve}(coll, debt, upperHint, lowerHint)` makes the vault the **borrower of record**. The borrowed MUSD goes to you. Any BTC beyond `coll` stays in the vault as the reserve. `fundReserve` adds more BTC (msg.value) or MUSD (pulled from the caller).
-3. `vault.health()` reports ICR, liquidation price, Recovery Mode, reserve, `redemptionSafeICR` and `redemptionRisk`. `needsProtection` is true when `ICR < trigger` **or** the trove is inside the redemption buffer.
+3. `vault.health()` reports ICR, liquidation price, Recovery Mode, reserve, `redemptionSafeICR` and `redemptionRisk`. The MUSD reserve is liquid MUSD plus sMUSD principal plus yield the savings vault has already credited. `needsProtection` is true when `ICR < trigger` **or** the trove is inside the redemption buffer.
 4. Anyone calls `vault.protect(upperHint, lowerHint)`. The vault:
    * reads the mUSD price feed;
    * picks the target: your target ICR, or for a redemption rescue, `redemptionSafeICR` + 1 point. The extra point stops rounding from triggering it again;
-   * plans a BTC top-up from the reserve and, if BTC runs short, an MUSD repayment (liquid MUSD, then sMUSD), never going below mUSD's min net debt;
+   * plans a BTC top-up from the reserve and, if BTC runs short, an MUSD repayment (credited savings yield, then liquid MUSD, then 1:1 sMUSD principal), never going below mUSD's min net debt;
    * applies both in **one** `BorrowerOperations.adjustTrove`. A split `addColl` then `repayMUSD` reverts in normal mode when each leg would leave the trove under 110%;
    * reverts if the rescue can't lift the trove **above 110%** (the same line in Recovery Mode);
    * pays `min(tipBps × rescue size, maxTip)` to the caller and emits `Protected(..., redemptionGuard)`. That tip is Lifeline's fee.
 5. **The redemption guard** (`redemptionSafeICR`) walks `SortedTroves` from the lowest ICR upward, at most 60 steps, and adds up the debt of other redeemable troves until it reaches your buffer. Your safe ICR is that trove's ICR + 2 points. The result is capped at 250%, so a thin queue can't drain your reserve.
 6. **Recovery Mode** is reported on `health()`, and borrowing is stricter while TCR is under 150%. The liquidation price stays at 110% of debt/collateral. The owner's trigger and target are not replaced with 155%/165%.
-7. **Idle MUSD.** The counterparty is the live [MUSD Savings Vault](https://mezo.org/docs/users/mezo-earn/vaults/musd-savings-vault/) on Mezo testnet, [`0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16`](https://explorer.test.mezo.org/address/0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16) (`musdToken()` is the same matsnet MUSD). `deployExcessMusd()` deposits only MUSD above `liquidMusdFloor` and only up to `savingsCap`, and only while `savingsPaused` is false. The floor cannot be set below **100 MUSD** (`MIN_LIQUID_MUSD`). Deposits start paused, with the floor at max and the cap at 0. Principal is 1:1 sMUSD. Yield is whatever `claimYield()` has actually been credited; Lifeline does not quote an APY. `protect()` can recall sMUSD into the owner's trove even while new deposits are paused.
+7. **Idle MUSD.** The counterparty is the live [MUSD Savings Vault](https://mezo.org/docs/users/mezo-earn/vaults/musd-savings-vault/) on Mezo testnet, [`0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16`](https://explorer.test.mezo.org/address/0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16) (`musdToken()` is the same matsnet MUSD). The factory is given that address at deploy time (`MUSD_SAVINGS` overrides it). `deployExcessMusd()` deposits only MUSD above `liquidMusdFloor` and only up to `savingsCap`, and only while `savingsPaused` is false. The floor cannot be set below **100 MUSD** (`MIN_LIQUID_MUSD`). Deposits start paused, with the floor at max and the cap at 0. The live vault is not ERC-4626: sMUSD is 1:1 principal, and yield is a separate `yieldIndex` (the share balance does not rise). `protect()` claims yield the vault has already credited before it sizes a repayment, then withdraws principal 1:1 if the liquid balance is still short. Lifeline does not quote an APY and does not price sMUSD on a market. Recall and that claim still work while new deposits are paused.
 8. **Third-party callers.** `ExternalKeeper` is a separate contract. It can call `protect()` and nothing else. The tip is paid to that contract. [TrovePilot v2](https://github.com/VitalR/mezo-trovepilot) can call the same `protect()` surface; this repo does not reimplement it.
 9. The owner keeps full control: `borrow`, `repay`, `withdrawColl`, `withdrawReserve`, `setPolicy`, the savings floor/cap/pause, `recallSavings`, `closeTrove` (returns collateral, reserve, and sMUSD principal), and `claimAndSweep`.
 
@@ -131,9 +131,11 @@ The keeper:
 
 ### Deploy
 ```bash
+# Optional env (Forge reads .env, which is gitignored): MUSD_SAVINGS, KEEPER_OPERATOR, DEMO_VAULT.
+# MUSD_SAVINGS defaults to the testnet savings vault. Do not commit a key or a .env.
 forge script script/Deploy.s.sol --rpc-url mezo_testnet --broadcast --private-key $DEPLOYER_KEY
 ```
-Then put the factory address in `docs/config.js` to turn on the dashboard's write actions.
+The script deploys `LifelineFactory` and `ExternalKeeper` and prints a `docs/config.js` block (factory, externalKeeper, savingsVault, and demoVault only if `DEMO_VAULT` is set). It does not write `docs/config.js` and it does not create a demo vault. The file in the repo still points at the Wave 1 deployment until someone explicitly replaces it after a broadcast.
 
 ## Deployments
 | Network | LifelineFactory |
@@ -157,7 +159,7 @@ The live BTC price can't be crashed on demand, so the liquidation-trigger rescue
 
 mUSD testnet addresses used (from `mezo-org/musd/solidity/deployments/matsnet`): BorrowerOperations `0xCdF7…beE5`, TroveManager `0xE47c…6bb0`, PriceFeed `0x86bC…9366`, SortedTroves `0x722E…68fA`, HintHelpers `0x4e4c…BCF6`, MUSD `0x1189…c503`.
 
-## Test list (`test/LifelineFork.t.sol`, 20 tests)
+## Test list (`test/LifelineFork.t.sol`, 21 tests)
 - opening through the vault makes the vault the borrower, and the owner receives the MUSD
 - `protect` reverts while healthy
 - **a 45% crash: the unprotected twin trove gets liquidated; the Lifeline trove is restored to exactly 160% and can't be liquidated**
@@ -166,6 +168,7 @@ mUSD testnet addresses used (from `mezo-org/musd/solidity/deployments/matsnet`):
 - **mixed BTC+MUSD under 110%: `addColl` alone and `repayMUSD` alone revert; one `adjustTrove` clears 110%**
 - **MUSD repayment from under 110% leaves the trove active when a liquidator tries it**
 - **sMUSD: deposits start paused, the cap starts at 0, the floor cannot go under 100 MUSD; excess is held as sMUSD; `protect()` recalls it while paused**
+- **credited savings yield: the sMUSD balance stays put while `receiveProtocolYield` accrues; share-only backing cannot clear 110%, and `protect()` (including through `ExternalKeeper`) claims the yield and the trove survives liquidation**
 - **`ExternalKeeper` (a second contract) calls `protect()`, repays MUSD from under 110%, receives the tip, and the trove survives liquidation**
 - a reserve too small to save the trove reverts with `ReserveTooSmall`
 - only the owner can withdraw, borrow, close, or change the policy

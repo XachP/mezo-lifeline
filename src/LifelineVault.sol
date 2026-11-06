@@ -15,6 +15,8 @@ import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves
 ///         widen liquidations. Optional redemption guard: also rescue when too little other MUSD debt
 ///         sits ahead of this trove in the redemption queue.
 ///         Idle MUSD above `liquidMusdFloor` can be deposited to Mezo's MUSD Savings Vault (sMUSD).
+///         sMUSD is 1:1 principal. Yield the savings vault has already credited is claimed before a
+///         rescue is sized, so the share balance is not treated as the whole MUSD redemption value.
 ///         Keepers can never withdraw, borrow, or move funds anywhere except into the owner's trove
 ///         (or into sMUSD still held by this vault, and only above the liquid floor).
 contract LifelineVault {
@@ -22,9 +24,6 @@ contract LifelineVault {
     uint256 public constant MCR = 1.1e18; // 110%: a trove is liquidatable only below this, in every mode
     uint256 public constant CCR = 1.5e18; // 150%: system enters Recovery Mode below this TCR. Not a liquidation line.
     uint256 public constant GAS_COMPENSATION = 200e18; // MUSD reserved for liquidators
-    /// @notice Mezo testnet MUSD Savings Rate proxy (sMUSD). `musdToken()` is matsnet MUSD.
-    ///         https://mezo.org/docs/users/mezo-earn/vaults/musd-savings-vault/
-    address public constant MUSD_SAVINGS = 0x6f461c68B2c5492C0F5CCEc5a264d692aA7A8e16;
     uint256 public constant MAX_TIP_BPS = 200; // keeper tip can never exceed 2% of the rescue size
     uint256 public constant MAX_REDEMPTION_ICR = 2.5e18; // redemption guard never chases the queue above 250%
     uint256 public constant REDEMPTION_MARGIN = 0.02e18; // sit 2 points above the last trove in the buffer
@@ -38,6 +37,8 @@ contract LifelineVault {
     IPriceFeed public immutable priceFeed;
     IERC20Min public immutable musd;
     ISortedTroves public immutable sortedTroves;
+    /// @notice Mezo MUSD Savings Rate this vault deposits into. Set by the factory.
+    IMUSDSavings public immutable savings;
     address public immutable owner;
     address public immutable factory;
 
@@ -114,6 +115,7 @@ contract LifelineVault {
         IPriceFeed _pf,
         IERC20Min _musd,
         ISortedTroves _sortedTroves,
+        IMUSDSavings _savings,
         Policy memory _policy
     ) {
         owner = _owner;
@@ -123,6 +125,8 @@ contract LifelineVault {
         priceFeed = _pf;
         musd = _musd;
         sortedTroves = _sortedTroves;
+        savings = _savings;
+        if (address(_savings) == address(0) || _savings.musdToken() != address(_musd)) revert SavingsMismatch();
         _setPolicy(_policy);
     }
 
@@ -234,15 +238,14 @@ contract LifelineVault {
     ///         Principal is 1:1. This does not report or simulate an APY.
     function deployExcessMusd() external nonReentrant returns (uint256 deposited) {
         if (savingsPaused) revert SavingsPaused();
-        if (IMUSDSavings(MUSD_SAVINGS).musdToken() != address(musd)) revert SavingsMismatch();
         uint256 staked = stakedMusd();
         uint256 room = savingsCap > staked ? savingsCap - staked : 0;
         uint256 liquid = musd.balanceOf(address(this));
         uint256 excess = liquid > liquidMusdFloor ? liquid - liquidMusdFloor : 0;
         deposited = excess < room ? excess : room;
         if (deposited == 0) return 0;
-        _approveMusd(MUSD_SAVINGS, deposited);
-        IMUSDSavings(MUSD_SAVINGS).deposit(deposited);
+        _approveMusd(address(savings), deposited);
+        savings.deposit(deposited);
         emit SavingsDeployed(deposited, stakedMusd());
     }
 
@@ -250,13 +253,13 @@ contract LifelineVault {
     ///         has actually credited. Owner only; keepers recall only inside `protect()`.
     function recallSavings(uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) return;
-        IMUSDSavings(MUSD_SAVINGS).withdraw(amount);
+        savings.withdraw(amount);
         emit SavingsRecalled(amount);
     }
 
     /// @notice Claim savings yield the protocol has already distributed. Returns 0 when none is due.
     function claimSavingsYield() external onlyOwner nonReentrant returns (uint256 amount) {
-        amount = IMUSDSavings(MUSD_SAVINGS).claimYield();
+        amount = savings.claimYield();
         if (amount > 0) emit SavingsYieldClaimed(amount);
     }
 
@@ -305,8 +308,14 @@ contract LifelineVault {
         uint256 newColl = coll + collAdded;
         uint256 newDebt = debt;
         uint256 liquidMusd = musd.balanceOf(address(this));
-        uint256 bal = liquidMusd + stakedMusd();
         if (collAdded < collNeeded) {
+            // sMUSD balanceOf is principal, not the MUSD a rescue can raise after yield
+            // has accrued. Claim what the savings vault has already credited, then count
+            // liquid MUSD plus 1:1 principal. Do not price sMUSD on a market.
+            _realizeSavingsYield();
+            liquidMusd = musd.balanceOf(address(this));
+            uint256 shares = stakedMusd();
+            uint256 bal = liquidMusd + shares;
             // debt the trove can carry at the target ratio with the new collateral
             uint256 maxDebt = (newColl * price) / target;
             uint256 want = debt > maxDebt ? debt - maxDebt : 0;
@@ -327,7 +336,9 @@ contract LifelineVault {
         //    Split addColl + repayMUSD reverts in normal mode when each leg is still under 110%.
         if (musdRepaid > liquidMusd) {
             uint256 pull = musdRepaid - liquidMusd;
-            IMUSDSavings(MUSD_SAVINGS).withdraw(pull);
+            // `withdraw` burns this many sMUSD and returns that much principal.
+            // It is not an ERC-4626 asset withdrawal. Yield was already claimed.
+            savings.withdraw(pull);
             emit SavingsRecalled(pull);
         }
         borrowerOperations.adjustTrove{value: collAdded}(0, musdRepaid, false, upperHint, lowerHint);
@@ -400,7 +411,7 @@ contract LifelineVault {
         h.recoveryMode = troveManager.checkRecoveryMode(h.price);
         (h.trigger, h.target) = effectiveThresholds();
         h.reserveBtc = address(this).balance;
-        h.reserveMusd = musd.balanceOf(address(this)) + stakedMusd();
+        h.reserveMusd = musd.balanceOf(address(this)) + savingsMusd();
         if (h.status == 1) {
             (h.debt, h.coll) = _debtAndColl();
             h.icr = troveManager.getCurrentICR(address(this), h.price);
@@ -411,13 +422,24 @@ contract LifelineVault {
         }
     }
 
-    /// @notice sMUSD this vault holds (principal). Yield, if the protocol has distributed any, is
-    ///         `IMUSDSavings.claimableYield` and is not included here.
+    /// @notice sMUSD this vault holds. That is principal: 1 sMUSD withdraws 1 MUSD.
+    ///         Credited yield is not part of this balance. See `unclaimedSavingsYield`.
     function stakedMusd() public view returns (uint256) {
-        (bool ok, bytes memory data) =
-            MUSD_SAVINGS.staticcall(abi.encodeWithSignature("balanceOf(address)", address(this)));
-        if (!ok || data.length < 32) return 0;
-        return abi.decode(data, (uint256));
+        return _staticUint(abi.encodeWithSignature("balanceOf(address)", address(this)));
+    }
+
+    /// @notice Yield the savings vault has already credited to this vault and not yet paid.
+    ///         Stored `claimableYield` plus the pending `yieldIndex` delta. Zero when the
+    ///         savings vault does not implement that accounting.
+    function unclaimedSavingsYield() public view returns (uint256) {
+        return _pendingSavingsYield(stakedMusd());
+    }
+
+    /// @notice MUSD this vault can take back from savings: 1:1 principal plus credited yield.
+    ///         Liquid MUSD already in this contract is not included. No sMUSD market price.
+    function savingsMusd() public view returns (uint256) {
+        uint256 shares = stakedMusd();
+        return shares + _pendingSavingsYield(shares);
     }
 
     // ------------------------------------------------------------------
@@ -441,8 +463,38 @@ contract LifelineVault {
     function _recallAllSavings() internal {
         uint256 s = stakedMusd();
         if (s == 0) return;
-        IMUSDSavings(MUSD_SAVINGS).withdraw(s);
+        savings.withdraw(s);
         emit SavingsRecalled(s);
+    }
+
+    /// @dev Match `MUSDSavingsRate.withdraw`: pull strategy yield into the index, then claim.
+    ///      A failed claim must not block a rescue that the 1:1 principal can still fund.
+    function _realizeSavingsYield() internal {
+        uint256 shares = stakedMusd();
+        uint256 stored = _staticUint(abi.encodeWithSignature("claimableYield(address)", address(this)));
+        if (shares == 0 && stored == 0) return;
+        try savings.receiveYieldFromStrategy() {} catch {}
+        if (_pendingSavingsYield(stakedMusd()) == 0) return;
+        try savings.claimYield() returns (uint256 amount) {
+            if (amount > 0) emit SavingsYieldClaimed(amount);
+        } catch {}
+    }
+
+    /// @dev Same split `MUSDSavingsRate._updateYieldFor` uses. `claimableYield` alone is stale
+    ///      until the next transfer, claim, or withdraw.
+    function _pendingSavingsYield(uint256 shares) internal view returns (uint256) {
+        uint256 stored = _staticUint(abi.encodeWithSignature("claimableYield(address)", address(this)));
+        if (shares == 0) return stored;
+        uint256 index = _staticUint(abi.encodeWithSignature("yieldIndex()"));
+        uint256 userIndex = _staticUint(abi.encodeWithSignature("supplyYieldIndex(address)", address(this)));
+        if (index <= userIndex) return stored;
+        return stored + (shares * (index - userIndex)) / 1e18;
+    }
+
+    function _staticUint(bytes memory data) internal view returns (uint256) {
+        (bool ok, bytes memory ret) = address(savings).staticcall(data);
+        if (!ok || ret.length < 32) return 0;
+        return abi.decode(ret, (uint256));
     }
 
     function _approveMusd(address spender, uint256 amount) internal {

@@ -1,0 +1,63 @@
+name: Tester report
+description: Report a Lifeline test run. Say whether you used the live Wave 1 frontend or Wave 2 code on a local fork.
+title: "[test] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The public dashboard and `docs/config.js` still talk to the Wave 1 factory
+        `0x37aC7acd4e48b79bb0dc6AaCA5AF3611cF176149` and demo vault
+        `0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF`.
+        Wave 2 (single `adjustTrove`, 110% liquidation line, sMUSD, ExternalKeeper)
+        is in the repo and in `forge test`. It is not a public deployment unless
+        you personally broadcast one and you say so below. See TESTERS.md.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: What did you test?
+      description: Pick the surface you actually used. The live site is Wave 1.
+      options:
+        - Live Wave 1 frontend and contracts (docs/config.js, factory 0x37aC…, demo vault 0xC92B…)
+        - Wave 2 code on a local fork (forge test or demo/local-demo.sh)
+        - A deployment I broadcast myself (not the live dashboard)
+    validations:
+      required: true
+  - type: input
+    id: network
+    attributes:
+      label: Network
+      description: Mezo testnet (31611), local fork, or something else.
+      placeholder: Mezo testnet 31611
+    validations:
+      required: true
+  - type: input
+    id: vault
+    attributes:
+      label: Vault address
+      description: Leave blank if you did not use a vault. The live demo vault is 0xC92BfDC83b03d32e39930Bfb789233e1Cc0fdbEF.
+      placeholder: "0x..."
+  - type: input
+    id: tx
+    attributes:
+      label: Transaction hash
+      description: Required for a transaction you sent. Leave blank for a read-only or local-fork check.
+      placeholder: "0x..."
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      description: Wallet actions, keeper command, or the forge test name.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+    validations:
+      required: true
