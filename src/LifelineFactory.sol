@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {LifelineVault} from "./LifelineVault.sol";
-import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves} from "./interfaces/IMezo.sol";
+import {IBorrowerOperations, ITroveManager, IPriceFeed, IERC20Min, ISortedTroves, IMUSDSavings} from "./interfaces/IMezo.sol";
 
 /// @title LifelineFactory
 /// @notice Deploys one LifelineVault per user and keeps a registry so keepers can scan every vault.
@@ -12,22 +12,33 @@ contract LifelineFactory {
     IPriceFeed public immutable priceFeed;
     IERC20Min public immutable musd;
     ISortedTroves public immutable sortedTroves;
+    IMUSDSavings public immutable savings;
 
     address[] public vaults;
     mapping(address => address[]) public vaultsOf;
 
     event VaultCreated(address indexed owner, address vault, uint256 triggerICR, uint256 targetICR);
 
-    constructor(IBorrowerOperations _bo, ITroveManager _tm, IPriceFeed _pf, IERC20Min _musd, ISortedTroves _st) {
+    constructor(
+        IBorrowerOperations _bo,
+        ITroveManager _tm,
+        IPriceFeed _pf,
+        IERC20Min _musd,
+        ISortedTroves _st,
+        IMUSDSavings _savings
+    ) {
         borrowerOperations = _bo;
         troveManager = _tm;
         priceFeed = _pf;
         musd = _musd;
         sortedTroves = _st;
+        savings = _savings;
     }
 
     function createVault(LifelineVault.Policy calldata p) external returns (LifelineVault v) {
-        v = new LifelineVault(msg.sender, borrowerOperations, troveManager, priceFeed, musd, sortedTroves, p);
+        v = new LifelineVault(
+            msg.sender, borrowerOperations, troveManager, priceFeed, musd, sortedTroves, savings, p
+        );
         vaults.push(address(v));
         vaultsOf[msg.sender].push(address(v));
         emit VaultCreated(msg.sender, address(v), p.triggerICR, p.targetICR);
